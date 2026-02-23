@@ -154,6 +154,9 @@ class ClientUI:
         # 创建图片UI和文本UI实例
         self.image_ui = ClientUIImage()
         self.text_ui = ClientUIText()
+        self.game_exit_font = mFont(const.exittitle, 'font/BoutiqueBitmap9x9_Bold_1.9.TTF', const.text_size, (230, 100, 150), (const.wsize, 10))
+        self.background = Image('picture/bg0.jpg', (const.wsize, const.hsize), (0, 0), 0, 1, 0)
+        self.grass_img = pygame.image.load('picture/grass.png').convert()
         
         # 设置背景颜色
         self.bg_color = (240, 240, 240)
@@ -167,6 +170,35 @@ class ClientUI:
         self.player_name = None
         self.game_state = {}
         self.keys_pressed = {}
+    def handle_game_input(self):
+        """联机客户端输入处理，发送持续移动/停止指令到服务器"""
+        if not self.in_game or not self.client:
+            return
+        keys = pygame.key.get_pressed()
+        direction = None
+        if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+            direction = 'left'
+        elif keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+            direction = 'right'
+        elif keys[pygame.K_UP] or keys[pygame.K_w]:
+            direction = 'up'
+        elif keys[pygame.K_DOWN] or keys[pygame.K_s]:
+            direction = 'down'
+        # 只在方向变化时发包
+        if direction != getattr(self, '_last_move_dir', None):
+            if direction:
+                try:
+                    msg = {"type": "action", "action": {"type": "move", "direction": direction}}
+                    self.client.send(json.dumps(msg).encode('utf-8'))
+                except Exception as e:
+                    self.text_ui.add_message(f"发送移动指令失败: {str(e)}", True)
+            else:
+                try:
+                    msg = {"type": "action", "action": {"type": "stop_move"}}
+                    self.client.send(json.dumps(msg).encode('utf-8'))
+                except Exception as e:
+                    self.text_ui.add_message(f"发送停止移动失败: {str(e)}", True)
+            self._last_move_dir = direction
     
     def validate_ip(self, ip_string):
         """
@@ -382,134 +414,83 @@ class ClientUI:
                 break
     
     def start_game(self):
-        """开始游戏"""
+        """开始游戏（复用MultiplayerGameLevel的渲染）"""
         self.in_game = True
+        # 初始化多人关卡对象
         self.game_level = MultiplayerGameLevel(multiplayer=True)
+        # 玩家对象缓存：{player_name: Image实例}
+        self.player_objs = {}
+        # 敌人对象缓存：[{...Enemy实例...}]
+        self.enemy_objs = []
         self.text_ui.add_message("游戏初始化完成", True)
-    
+
     def handle_sync_message(self, msg):
-        """处理同步消息"""
+        """处理同步消息，驱动game_level对象属性"""
         if not isinstance(msg, dict):
             self.text_ui.add_message("无效的同步消息格式", True)
             return
-        
-        # 更新游戏状态
         self.game_state = msg
-        
-        # 如果是第一次收到同步消息，确定自己的玩家名称
+        # 玩家名识别
         if not self.player_name and 'players' in msg:
             for client in msg['players']:
-                # 假设服务器会在玩家数据中包含一个标识符
                 if msg['players'][client].get('is_you', False):
                     self.player_name = client
                     self.text_ui.add_message(f"您的玩家名称已设置为: {self.player_name}", True)
                     break
-    
-    def send_action(self, action_type, params=None):
-        """发送游戏操作到服务器"""
-        if not self.client or not self.in_game:
-            self.text_ui.add_message("未连接到服务器或不在游戏中，无法发送操作", True)
-            return
-            
-        if not isinstance(action_type, str) or not action_type.strip():
-            self.text_ui.add_message("无效的操作类型", True)
-            return
-            
-        action = {
-            "type": "action",
-            "action": {
-                "type": action_type,
-                **(params or {})
-            }
-        }
-        
-        try:
-            self.client.send(json.dumps(action).encode('utf-8'))
-            self.text_ui.add_message(f"操作 {action_type} 已发送", False)
-        except ConnectionResetError:
-            self.client = None
-            self.client_status = "未连接"
-            self.text_ui.update_status(self.client_status)
-            self.text_ui.add_message("服务器已断开连接", True)
-        except Exception as e:
-            self.text_ui.add_message(f"发送操作失败: {str(e)}", True)
-    
-    def handle_game_input(self):
-        """处理游戏输入"""
-        if not self.in_game:
-            return
-            
-        # 获取键盘状态
-        keys = pygame.key.get_pressed()
-        
-        # 移动控制
-        if keys[pygame.K_LEFT] or keys[pygame.K_a]:
-            self.send_action('move', {'direction': 'left'})
-        if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
-            self.send_action('move', {'direction': 'right'})
-        if keys[pygame.K_UP] or keys[pygame.K_w]:
-            self.send_action('move', {'direction': 'up'})
-        if keys[pygame.K_DOWN] or keys[pygame.K_s]:
-            self.send_action('move', {'direction': 'down'})
-            
-        # 攻击控制
-        if keys[pygame.K_SPACE] and not self.keys_pressed.get(pygame.K_SPACE):
-            self.send_action('attack')
-            self.keys_pressed[pygame.K_SPACE] = True
-        elif not keys[pygame.K_SPACE]:
-            self.keys_pressed[pygame.K_SPACE] = False
-    
+        # --- 同步玩家对象 ---
+        if hasattr(self, 'game_level') and self.game_level:
+            # 玩家
+            players = msg.get('players', {})
+            for name, pdata in players.items():
+                if name not in self.player_objs:
+                    # 创建Image对象，假设所有玩家用同一贴图
+                    self.player_objs[name] = Image('picture/Capoo/%d.png', (const.capoo_width, const.capoo_hight), pdata.get('pos', (0,0)), 1, 8, 1)
+                obj = self.player_objs[name]
+                obj.pos = list(pdata.get('pos', (0,0)))
+                obj.facing_left = pdata.get('facing_left', False)
+                obj.hp = pdata.get('hp', 100)
+                obj.size = pdata.get('size', (const.capoo_width, const.capoo_hight))
+                obj.reloade()
+            # 敌人
+            enemies = msg.get('enemies', [])
+            # 数量变化时重建
+            if len(self.enemy_objs) != len(enemies):
+                from Enemies import Enemy
+                self.enemy_objs = [Enemy(None, size=e.get('size', (50,50)), speed=2) for e in enemies]
+            for obj, edata in zip(self.enemy_objs, enemies):
+                obj.pos = list(edata.get('pos', (0,0)))
+                obj.facing_left = edata.get('facing_left', False)
+                obj.hp = edata.get('hp', 100)
+                obj.size = edata.get('size', (50,50))
+                obj.reloade()
+
     def draw_game(self):
-        """绘制游戏画面"""
-        if not self.in_game or not self.game_state:
+        """复用game_level的draw逻辑进行渲染，并绘制UI和草地背景"""
+        if not self.in_game or not self.game_state or not hasattr(self, 'game_level'):
             return
-            
-        # 清空屏幕
-        self.screen.fill((0, 0, 0))
-        
-        # 绘制地图
-        if 'map' in self.game_state:
-            # 这里应该根据地图数据绘制地图
-            pass
-        
-        # 绘制玩家
-        if 'players' in self.game_state:
-            for player_name, player_data in self.game_state['players'].items():
-                # 绘制玩家精灵
-                pos = player_data.get('pos', (0, 0))
-                size = player_data.get('size', (const.capoo_width, const.capoo_hight))
-                facing_left = player_data.get('facing_left', False)
-                
-                # 简单绘制一个矩形表示玩家
-                color = (0, 255, 0) if player_name == self.player_name else (255, 0, 0)
-                pygame.draw.rect(self.screen, color, pygame.Rect(pos[0], pos[1], size[0], size[1]))
-                
-                # 绘制玩家名称
-                font = pygame.font.Font("font/BoutiqueBitmap9x9_Bold_1.9.TTF", 14)
-                name_surface = font.render(player_name, True, (255, 255, 255))
-                self.screen.blit(name_surface, (pos[0], pos[1] - 20))
-                
-                # 绘制血条
-                hp = player_data.get('hp', 100)
-                hp_width = size[0] * (hp / 100)
-                pygame.draw.rect(self.screen, (255, 0, 0), pygame.Rect(pos[0], pos[1] - 10, size[0], 5))
-                pygame.draw.rect(self.screen, (0, 255, 0), pygame.Rect(pos[0], pos[1] - 10, hp_width, 5))
-        
-        # 绘制敌人
-        if 'enemies' in self.game_state:
-            for enemy in self.game_state['enemies']:
-                # 绘制敌人精灵
-                pos = enemy.get('pos', (0, 0))
-                size = enemy.get('size', (30, 30))
-                
-                # 简单绘制一个矩形表示敌人
-                pygame.draw.rect(self.screen, (255, 0, 255), pygame.Rect(pos[0], pos[1], size[0], size[1]))
-        
-        # 更新显示
+        # 平铺grass.png作为背景
+        grass_w, grass_h = self.grass_img.get_width(), self.grass_img.get_height()
+        offset_x, offset_y = 0, 0  # 联机模式暂不支持camera
+        for x in range(-grass_w, const.wsize + grass_w, grass_w):
+            for y in range(-grass_h, const.hsize + grass_h, grass_h):
+                screen_x = x - offset_x
+                screen_y = y - offset_y
+                self.screen.blit(self.grass_img, (screen_x, screen_y))
+        # 玩家
+        for name, obj in self.player_objs.items():
+            obj.draw(self.screen)
+        # 敌人
+        for obj in self.enemy_objs:
+            obj.draw(self.screen)
+        # 分数
+        score = self.game_state.get('score', 0)
+        mFont(f"score:{score}", 'font/BoutiqueBitmap9x9_Bold_1.9.ttf', 50, (230, 100, 150), (const.wsize, 160)).fdraw(self.screen)
+        # 退出按钮
+        self.game_exit_font.fdraw(self.screen)
         pygame.display.flip()
-    
+
     def run(self):
-        """运行客户端UI"""
+        """运行客户端UI，支持UI自适应和主菜单切换"""
         clock = pygame.time.Clock()
         while self.running:
             for event in pygame.event.get():
@@ -533,10 +514,20 @@ class ClientUI:
                     self.text_ui = ClientUIText()
                     self.text_ui.messages = old_messages
                     self.text_ui.update_status(old_status)
+                    # UI自适应
+                    self.game_exit_font.pos = [(const.wsize - self.game_exit_font.getrect().width - 10), 10]
+                    # 重新加载背景和草地图片
+                    self.background = Image('picture/bg0.jpg', (const.wsize, const.hsize), (0, 0), 0, 1, 0)
+                    self.grass_img = pygame.image.load('picture/grass.png').convert()
                 # 处理所有其他事件（包括窗口缩放）
+                if self.in_game:
+                    # 处理退出按钮
+                    button_result = self.game_exit_font.Button(event, "main_menu")
+                    if button_result['state_change']:
+                        self.running = False
+                        break
                 if not self.in_game:
                     self.handle_event(event)
-            
             # 处理游戏输入
             if self.in_game:
                 self.handle_game_input()

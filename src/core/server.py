@@ -105,32 +105,28 @@ class GameServer:
     def handle_client(self, client_info):
         """处理单个客户端的线程函数"""
         client_socket = client_info['socket']
-        
+        player_name = client_info['name']
         while self.running:
             try:
-                # 接收数据
                 data = client_socket.recv(4096)
                 if not data:
                     break
-                
-                # 解析JSON消息
                 message = json.loads(data.decode('utf-8'))
-                
-                # 处理消息
                 if message['type'] == 'chat':
-                    # 添加发送者信息
                     message['sender'] = client_info['name']
-                    
-                    # 广播消息（broadcast方法内部会调用message_callback）
                     self.broadcast(message)
-                
+                elif message['type'] == 'action':
+                    if hasattr(self, 'current_players') and player_name in self.current_players:
+                        action = message['action']
+                        if action.get('type') == 'move':
+                            self.current_players[player_name]['move_dir'] = action.get('direction')
+                        elif action.get('type') == 'stop_move':
+                            self.current_players[player_name]['move_dir'] = None
             except Exception as e:
                 print(f"处理客户端消息时出错: {e}")
                 break
-        
-        # 客户端断开连接
         self.remove_client(client_info)
-    
+
     def remove_client(self, client_info):
         """移除客户端"""
         # 先移除再广播，避免广播时操作已关闭socket
@@ -200,11 +196,12 @@ class GameServer:
         try:
             while self.running:
                 loop_start = time.time()
-                players_copy = copy.deepcopy(players)
-                game_running = game.update(players_copy)
+                # 关键：不再深拷贝，保持引用一致，持续累加 pos
+                game_running = game.update(players)
+                # 持久化最新状态
                 state_msg = {
                     'type': 'sync',
-                    'players': players_copy,
+                    'players': copy.deepcopy(players),  # 广播时再深拷贝，防止并发问题
                     'enemies': game.get_enemies_state(),
                     'map': game.get_map_state(),
                 }
@@ -230,16 +227,19 @@ class GameServer:
         with self.clients_lock:
             client_snapshot = self.clients.copy()
         for idx, client in enumerate(client_snapshot):
+            # pos 改为 list，便于原地修改
             players[client['name']] = {
-                'pos': game.get_spawn_point(idx),
+                'pos': list(game.get_spawn_point(idx)),  # 关键：用 list
                 'hp': 100,
                 'size': (const.capoo_width, const.capoo_hight),
                 'score': 0,
                 'action': None,
+                'move_dir': None,
                 'facing_left': False,
                 'attacking': False,
                 'attack_damage': 10
             }
+        self.current_players = players
         start_msg = {
             'type': 'game_start',
             'players': copy.deepcopy(players),

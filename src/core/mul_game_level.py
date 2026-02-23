@@ -31,6 +31,13 @@ class MultiplayerGameLevel(GameLevel):
         # 网络同步相关
         self.last_sync_time = time.time()
         self.sync_interval = 1.0 / 30  # 30fps同步频率print("1")
+        
+        # 确保DS、grass_img、capoo_surface等资源初始化
+        self.DS = pygame.display.get_surface()
+        if not hasattr(self, 'grass_img') or self.grass_img is None:
+            self.grass_img = pygame.image.load('picture/grass.png').convert()
+        if not hasattr(self, 'capoo_surface') or self.capoo_surface is None:
+            self.capoo_surface = image.Image('picture/Capoo/%d.PNG', (const.capoo_width, const.capoo_hight), (0, 0), 1, 8, 1)
     
     def get_spawn_point(self, player_index):
         """获取玩家出生点
@@ -44,13 +51,32 @@ class MultiplayerGameLevel(GameLevel):
             y = random.randint(100, 500)
             return (x, y)
     
-    def update(self, players_data):
+    def update(self, players_data, enemies_data=None):
         """更新游戏状态，供服务器调用
         players_data: 玩家数据字典 {player_name: {pos, hp, action, ...}}
+        enemies_data: 敌人数据列表 [{type, pos, size, hp, ...}]
         """
-        # 更新玩家数据
         self.players = players_data
-        
+        # 同步敌人组（如有enemies_data）
+        if enemies_data is not None:
+            self.enemy_group.empty()
+            self.attack_enemy_group.empty()
+            for e in enemies_data:
+                if e['type'] == 'normal':
+                    enemy = Enemy(self.capoo_surface, size=e['size'], speed=5)
+                    enemy.pos = e['pos']
+                    enemy.hp = e['hp']
+                    self.enemy_group.add(enemy)
+                else:
+                    enemy = AttackEnemy(self.capoo_surface, size=e['size'], speed=5)
+                    enemy.pos = e['pos']
+                    enemy.hp = e['hp']
+                    self.attack_enemy_group.add(enemy)
+        # 持续移动处理
+        for player_name, player_data in self.players.items():
+            move_dir = player_data.get('move_dir')
+            if move_dir:
+                self._move_player(player_data, move_dir)
         # 处理玩家操作
         for player_name, player_data in self.players.items():
             action = player_data.get('action')
@@ -65,6 +91,18 @@ class MultiplayerGameLevel(GameLevel):
         # 检测碰撞
         self.check_collisions()
         return not (self.game_state == "main_menu")  # 返回游戏是否继续
+    
+    def _move_player(self, player_data, direction):
+        if direction == 'left':
+            player_data['pos'] = (player_data['pos'][0] - 5, player_data['pos'][1])
+            player_data['facing_left'] = True
+        elif direction == 'right':
+            player_data['pos'] = (player_data['pos'][0] + 5, player_data['pos'][1])
+            player_data['facing_left'] = False
+        elif direction == 'up':
+            player_data['pos'] = (player_data['pos'][0], player_data['pos'][1] - 5)
+        elif direction == 'down':
+            player_data['pos'] = (player_data['pos'][0], player_data['pos'][1] + 5)
     
     def handle_player_action(self, player_name, action):
         """处理玩家操作
@@ -319,3 +357,52 @@ class MultiplayerGameLevel(GameLevel):
             self.draw()
             clock.tick(const.fps)
         return self.game_state
+    
+    def draw(self):
+        try:
+            self.DS.fill((255,255,255))
+            local_player_name = getattr(self, 'local_player_name', None)
+            if local_player_name and local_player_name in self.players:
+                player_data = self.players[local_player_name]
+                player_pos = player_data['pos']
+                player_size = player_data.get('size', (const.capoo_width, const.capoo_hight))
+                player_rect = pygame.Rect(player_pos[0], player_pos[1], player_size[0], player_size[1])
+                self.camera.update(player_rect)
+                # 同步capoo_surface属性
+                self.capoo_surface.size = player_size
+                self.capoo_surface.rect = player_rect
+                self.capoo_surface.facing_left = player_data.get('facing_left', False)
+            grass_w, grass_h = self.grass_img.get_width(), self.grass_img.get_height()
+            offset_x = self.camera.offset_x % grass_w
+            offset_y = self.camera.offset_y % grass_h
+            for x in range(-grass_w, const.wsize + grass_w, grass_w):
+                for y in range(-grass_h, const.hsize + grass_h, grass_h):
+                    screen_x = x - offset_x
+                    screen_y = y - offset_y
+                    self.DS.blit(self.grass_img, (screen_x, screen_y))
+            self.game_exit_font.fdraw(self.DS)
+            if local_player_name and local_player_name in self.players:
+                score = self.players[local_player_name].get('score', 0)
+            else:
+                score = 0
+            image.mFont("score:" + str(score), 'font/BoutiqueBitmap9x9_Bold_1.9.ttf', 50, (230, 100, 150), (const.wsize, 160)).fdraw(self.DS)
+            for player_name, player_data in self.players.items():
+                pos = player_data['pos']
+                size = player_data.get('size', (const.capoo_width, const.capoo_hight))
+                facing_left = player_data.get('facing_left', False)
+                rect = pygame.Rect(pos[0], pos[1], size[0], size[1])
+                if player_name == local_player_name:
+                    self.capoo_surface.rect = rect
+                    self.capoo_surface.facing_left = facing_left
+                    self.capoo_surface.size = size
+                    self.capoo_surface.draw(self.DS, self.camera)
+                else:
+                    draw_rect = self.camera.apply(rect)
+                    pygame.draw.rect(self.DS, (100, 200, 255), draw_rect)
+            for enemy in self.enemy_group:
+                enemy.draw(self.DS, self.camera)
+            for enemy in self.attack_enemy_group:
+                enemy.draw(self.DS, self.camera)
+            pygame.display.flip()
+        except Exception as e:
+            print("Draw error:", e)

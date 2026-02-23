@@ -1,6 +1,8 @@
 import pygame
 import const
 import random
+import ability
+import math
 class Image(pygame.sprite.Sprite):
     def load_image(self, pathFmt):
         """
@@ -51,7 +53,8 @@ class Image(pygame.sprite.Sprite):
         self.bite_frame = 0
         self.bite_animating = False
         self.bite_pos = (0, 0)
-   
+        self.abilities = []  # 玩家能力列表
+    
     def getrect(self):
         rect = self.image.get_rect(midbottom = (self.size[0]/2,0))
         rect.topleft = self.pos
@@ -165,16 +168,43 @@ class Image(pygame.sprite.Sprite):
             ds.blit(self.image, camera.apply(self.getrect()))
         else:
             ds.blit(self.image, self.getrect())
-        # 攻击判定区域咬合动画
+
+        # 攻击动画
         if self.is_attacking or self.bite_animating:
-            attack_rect = self.get_attack_rect()
-            bite_idx = min(self.bite_frame // 2, len(self.bite_images) - 1)
-            bite_img = pygame.transform.scale(self.bite_images[bite_idx], (attack_rect.width, attack_rect.height))
-            bite_rect = bite_img.get_rect(center=attack_rect.center)
-            if camera is not None:
-                ds.blit(bite_img, camera.apply(bite_rect))
+            ability_list = getattr(self, 'abilities', [])
+            if len(ability_list) == 0:
+                attack_rect = self.get_attack_rect()
+                bite_idx = min(self.bite_frame // 2, len(self.bite_images) - 1)
+                bite_img = pygame.transform.scale(self.bite_images[bite_idx], (attack_rect.width, attack_rect.height))
+                bite_rect = bite_img.get_rect(center=attack_rect.center)
+                if camera is not None:
+                    ds.blit(bite_img, camera.apply(bite_rect))
+                else:
+                    ds.blit(bite_img, bite_rect)               
             else:
-                ds.blit(bite_img, bite_rect)
+                attack_rect = self.get_attack_rect()
+                for ab in getattr(self, 'abilities', []):
+                    # 多重撕咬能力的可视化
+                    if hasattr(ab, 'ability_name') and ab.ability_name == "多重撕咬":
+                        bite_idx = min(self.bite_frame // 2, len(self.bite_images) - 1)
+                        bite_img = pygame.transform.scale(self.bite_images[bite_idx], (attack_rect.width, attack_rect.height))
+                        center = pygame.Vector2(self.getrect().center)
+                        angle_list = [60,0,-60]
+                        for angle in angle_list:
+                            offset = pygame.Vector2(attack_rect.center) - center
+                            rad = math.radians(angle)
+                            rot_offset = pygame.Vector2(
+                                offset.x * math.cos(rad) - offset.y * math.sin(rad),
+                                offset.x * math.sin(rad) + offset.y * math.cos(rad)
+                            )
+                            new_center = center + rot_offset
+                            bite_rect = attack_rect.copy()
+                            bite_rect.center = (int(new_center.x), int(new_center.y))
+                            if camera is not None:
+                                ds.blit(bite_img, camera.apply(bite_rect))
+                            else:
+                                ds.blit(bite_img, bite_rect)
+                # 可扩展：其他攻击能力类型的判定区域可视化
         # 半身穿墙效果：左边超界时右侧补绘
         if self.pos[0] < 0:
             temp_rect = self.getrect().copy()
@@ -228,7 +258,7 @@ class Image(pygame.sprite.Sprite):
             self.attack_frame = 0
             self.attack_hit_enemies = []  # 攻击开始时清空
 
-    def play_attack_animation(self,animation_len = 5):
+    def play_attack_animation(self, animation_len=5):
         if self.is_attacking:
             idx = min(self.attack_frame // max(1, self.attack_cooldown // animation_len), len(self.attack_paths) - 1)
             path = self.attack_paths[idx]
@@ -244,6 +274,10 @@ class Image(pygame.sprite.Sprite):
                 self.bite_frame += 1
                 if self.bite_frame >= len(self.bite_images) * 2:
                     self.bite_animating = False
+            # 能力动画帧同步（如多重撕咬等能力）
+            for ab in getattr(self, 'abilities', []):
+                if hasattr(ab, 'on_attack_animation'):
+                    ab.on_attack_animation(self)
             if self.attack_frame >= self.attack_cooldown:
                 self.is_attacking = False
                 self.attack_frame = 0
@@ -314,6 +348,19 @@ class Image(pygame.sprite.Sprite):
         pygame.display.flip()
         pygame.time.Clock().tick(const.fps)
 
+    def add_ability(self, ability_obj):
+        self.abilities.append(ability_obj)
+        ability_obj.apply_to_player(self)
+
+    def attack_with_abilities(self, target_group):
+        """攻击时调用所有能力的on_attack，返回所有命中的敌人"""
+        hit_enemies = []
+        for ab in self.abilities:
+            if hasattr(ab, 'on_attack'):
+                result = ab.on_attack(self, target_group)
+                if result:
+                    hit_enemies.extend(result)
+        return hit_enemies
 class mFont(pygame.sprite.Sprite):
     _instances = []
     def __init__(self,title, font_path, size, color=None,pos=(0,0)):
@@ -612,4 +659,5 @@ class InputBox(mFont):
         
         # 调整文本位置
         self.pos[1] = self.box_rect.y + (self.box_height - self.rect.height) // 2
+
 

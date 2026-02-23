@@ -9,6 +9,7 @@ from Enemies import Enemy
 import random
 from Enemies import AttackEnemy
 import camera
+from upgrade_ui import UpgradeUI
 
 class GameLevel(BaseLevel):
     def __init__(self, multiplayer=False):
@@ -44,6 +45,7 @@ class GameLevel(BaseLevel):
                 new_width, new_height = self.handle_resize(event, self.background)
                 new_font_size = int(const.title1_size * (new_height / const.hsize))
                 self.background = image.Image('picture/bg0.jpg', (const.wsize, const.hsize), (0, 0), 0, 1, 0)
+                self.grass_img = pygame.image.load('picture/grass.png').convert()
                 self.game_exit_font.pos = [(new_width - self.game_exit_font.getrect().width - 10), 10]
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_j:
@@ -64,7 +66,7 @@ class GameLevel(BaseLevel):
         import math
         base_speed_x = -0.06
         base_speed_y = -0.04
-        k = 0.08
+        k = 0.05
         speed_x = base_speed_x * math.exp(k * score)
         speed_y = base_speed_y * math.exp(k * score)
         return speed_x, speed_y
@@ -136,6 +138,19 @@ class GameLevel(BaseLevel):
         # 玩家攻击判定
         if self.capoo_surface.is_attacking:
             attack_rect = self.capoo_surface.get_attack_rect()
+            # 能力系统：多重判定
+            # 1. 先用能力系统判定
+            ability_hit = self.capoo_surface.attack_with_abilities(self.attack_enemy_group)
+            for enemy in ability_hit:
+                if enemy not in self.capoo_surface.attack_hit_enemies:
+                    self.capoo_surface.attack_hit_enemies.append(enemy)
+                    if enemy.hp_caculater(self.capoo_surface.attack_damage) <= 0:
+                        self.capoo_jiao.Play_sound(False)
+                        enemy.reset(self.camera)
+                        self.capoo_surface.change_rect(6, 4)
+                        const.update_score(self.capoo_surface.size[0])
+                        break
+            # 2. 原有主攻击判定
             for enemy in self.attack_enemy_group:
                 if attack_rect.colliderect(enemy.getrect()) and enemy not in self.capoo_surface.attack_hit_enemies:
                     self.capoo_surface.attack_hit_enemies.append(enemy)
@@ -146,6 +161,16 @@ class GameLevel(BaseLevel):
                         const.update_score(self.capoo_surface.size[0])
                         break
             # 玩家攻击判定（普通敌人）
+            ability_hit2 = self.capoo_surface.attack_with_abilities(self.enemy_group)
+            for enemy in ability_hit2:
+                if enemy not in self.capoo_surface.attack_hit_enemies:
+                    self.capoo_surface.attack_hit_enemies.append(enemy)
+                    if enemy.hp_caculater(self.capoo_surface.attack_damage) <= 0:
+                        self.capoo_jiao.Play_sound(False)
+                        enemy.reset(self.camera)
+                        self.capoo_surface.change_rect(6, 4)
+                        const.update_score(self.capoo_surface.size[0])
+                        break
             for enemy in self.enemy_group:
                 if attack_rect.colliderect(enemy.getrect()) and enemy not in self.capoo_surface.attack_hit_enemies:
                     self.capoo_surface.attack_hit_enemies.append(enemy)
@@ -167,7 +192,7 @@ class GameLevel(BaseLevel):
                     self.capoo_surface.change_rect(shrink_x*10, shrink_y*10)
                     const.update_score(self.capoo_surface.size[0])
                 enemy.attack_finished = False
-        if const.player_score <= -8:
+        if const.player_score <= 0:
             Game_over_Font = image.mFont("GAME OVER", 'font/BoutiqueBitmap9x9_Bold_1.9.ttf', 100, (230, 100, 150), (const.wsize/2, const.hsize/2))
             Game_over_Font.fdraw(self.DS)
             pygame.display.flip()
@@ -175,6 +200,20 @@ class GameLevel(BaseLevel):
             const.Reset_Game_Const()
             self.game_state = "main_menu"
             return True
+        #升级UI弹出逻辑
+        if hasattr(const, 'upgrade_pending') and const.upgrade_pending:
+            try:
+                upgrade_ui = UpgradeUI()
+                choice = upgrade_ui.show(self.DS, redraw_callback=self.draw)
+                # 找到被选中的UpgradeOption并添加到player
+                if choice:
+                    for opt in upgrade_ui.options:
+                        if opt.title == choice:
+                            self.capoo_surface.add_ability(opt.ability)
+                            break
+            except Exception as e:
+                print("升级UI弹出异常：", e)
+            const.upgrade_pending = False
         return False
 
     def draw(self):
@@ -191,6 +230,9 @@ class GameLevel(BaseLevel):
         self.game_exit_font.fdraw(self.DS)  # UI元素一般不跟随相机
         image.mFont("score:" + str(const.player_score), 'font/BoutiqueBitmap9x9_Bold_1.9.ttf', 50, (230, 100, 150), (const.wsize, 160)).fdraw(self.DS)
         self.capoo_surface.draw(self.DS, self.camera)
+        # 能力判定区域可视化渲染（如多重撕咬等能力）
+        if hasattr(self.capoo_surface, 'draw_abilities'):
+            self.capoo_surface.draw_abilities(self.DS, self.camera)
         for enemy in self.enemy_group:
             enemy.draw(self.DS, self.camera)
         for enemy in self.attack_enemy_group:
