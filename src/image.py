@@ -43,10 +43,18 @@ class Image(pygame.sprite.Sprite):
         # 初始化输入处理器（仅在需要时创建）
         self.input_handler = None
         self.is_attacking = False
-        self.attack_frame = 0
-        self.attack_cooldown = 10  # 攻击动画帧数
+        self.attack_frame = 0.0
+        self.attack_cooldown = 10 / 60  # 攻击动画时长（秒）
+        self.attack_interval = 1.0  # 攻击冷却（秒），可被「迅捷撕咬」缩短
+        self.attack_timer = 0.0  # 剩余冷却时间（秒）
         self.attack_paths = ['picture/Capoo/AT/AT0.png', 'picture/Capoo/AT/AT1.png', 'picture/Capoo/AT/AT2.png', 'picture/Capoo/AT/AT3.png', 'picture/Capoo/AT/AT4.png']
         self.attack_damage = 25  # 玩家攻击伤害，固定为25
+        self.move_speed = 600.0  # 移动速度（像素/秒，可被能力提升）
+        self.attack_width_scale = 0.5  # 攻击判定宽度比例（可被能力提升）
+        self.attack_height_scale = 1.0  # 攻击判定高度比例（可被能力提升）
+        self.attack_offset_x = 0  # 攻击判定x方向偏移
+        self.shrink_resist = 0.0  # 体型衰减减免比例（0~1）
+        self.growth_scale = 1.0  # 击杀成长倍率
         self.attack_hit_enemies = []  # 记录本次攻击已命中的敌人
         self.bite_paths = [f'picture/bites/{i}.png' for i in range(3)]
         self.bite_images = [pygame.image.load(path).convert_alpha() for path in self.bite_paths]
@@ -54,6 +62,7 @@ class Image(pygame.sprite.Sprite):
         self.bite_animating = False
         self.bite_pos = (0, 0)
         self.abilities = []  # 玩家能力列表
+        self.pending_kills = []  # 能力造成的击杀，由关卡统一结算
     
     def getrect(self):
         rect = self.image.get_rect(midbottom = (self.size[0]/2,0))
@@ -62,33 +71,46 @@ class Image(pygame.sprite.Sprite):
     #取得图片
 
     def change_rect(self,add_wide,add_hight):
-        self.size = (self.size[0] + add_wide, self.size[1] + add_hight)  # 修改 size 属性
-        self.image = pygame.transform.scale(self.image, self.size)  # 调整 image 的大小
+        # 体型只保底、不设上限：衰减到下限即“体型归零”，由关卡判定游戏结束
+        new_w, new_h = const.clamp_capoo_size(self.size[0] + add_wide, self.size[1] + add_hight)
+        if abs(new_w - self.size[0]) < 1e-6 and abs(new_h - self.size[1]) < 1e-6:
+            return  # 已在下限，跳过缩放（也避免每帧重复生成表面）
+        self.size = (new_w, new_h)  # 修改 size 属性
+        self.image = pygame.transform.scale(self.image, (int(new_w), int(new_h)))  # 调整 image 的大小
         self.rect = self.getrect()  # 更新 rect 的位置
+
+    def is_min_size(self):
+        """体型是否已衰减到下限（体型归零 → 关卡判定游戏结束）。"""
+        return (self.size[0] <= const.capoo_min_width + 1e-6 or
+                self.size[1] <= const.capoo_min_hight + 1e-6)
     
     def get_hitbox(self,wide,hight):
         hitbox = self.getrect().inflate((wide,hight))
         return hitbox
 
-    def Player_move(self, enemy_group=None, attack_enemy_group=None):
+    def Player_move(self, enemy_group=None, attack_enemy_group=None, dt=const.FIXED_DT):
         self.is_walking = False
         prev_facing = self.facing_left
         keys = pygame.key.get_pressed()
-        move_x, move_y = 0, 0
+        direction = pygame.Vector2(0, 0)
+        speed = getattr(self, 'move_speed', 600.0)
         if keys[pygame.K_LEFT] or keys[pygame.K_a]:
-            move_x -= 10
+            direction.x -= 1
             self.facing_left = True
             self.is_walking = True
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
-            move_x += 10
+            direction.x += 1
             self.facing_left = False
             self.is_walking = True
         if (keys[pygame.K_UP] or keys[pygame.K_w]):
-            move_y -= 10
+            direction.y -= 1
             self.is_walking = True
         if (keys[pygame.K_DOWN] or keys[pygame.K_s]):
-            move_y += 10
+            direction.y += 1
             self.is_walking = True
+        if direction.length_squared() > 0:
+            direction = direction.normalize() * speed * dt
+        move_x, move_y = direction.x, direction.y
         # 软碰撞逻辑
         push_vec = pygame.Vector2(0, 0)
         if enemy_group is not None or attack_enemy_group is not None:
@@ -118,8 +140,8 @@ class Image(pygame.sprite.Sprite):
                         if vec.length() > 0:
                             push_vec += vec.normalize()
         # 应用玩家输入和软碰撞推力
-        self.pos[0] += move_x + push_vec.x * 5  # 推力强度可调
-        self.pos[1] += move_y + push_vec.y * 5
+        self.pos[0] += move_x + push_vec.x * 300 * dt
+        self.pos[1] += move_y + push_vec.y * 300 * dt
         if self.is_walking:
             self.updataRecord(self.Record + 1)
         if prev_facing != self.facing_left:
@@ -169,42 +191,16 @@ class Image(pygame.sprite.Sprite):
         else:
             ds.blit(self.image, self.getrect())
 
-        # 攻击动画
+        # 攻击动画：始终绘制主撕咬判定区，额外判定区的表现由 draw_abilities 负责
         if self.is_attacking or self.bite_animating:
-            ability_list = getattr(self, 'abilities', [])
-            if len(ability_list) == 0:
-                attack_rect = self.get_attack_rect()
-                bite_idx = min(self.bite_frame // 2, len(self.bite_images) - 1)
-                bite_img = pygame.transform.scale(self.bite_images[bite_idx], (attack_rect.width, attack_rect.height))
-                bite_rect = bite_img.get_rect(center=attack_rect.center)
-                if camera is not None:
-                    ds.blit(bite_img, camera.apply(bite_rect))
-                else:
-                    ds.blit(bite_img, bite_rect)               
+            attack_rect = self.get_attack_rect()
+            bite_idx = min(self.bite_frame // 2, len(self.bite_images) - 1)
+            bite_img = pygame.transform.scale(self.bite_images[bite_idx], (attack_rect.width, attack_rect.height))
+            bite_rect = bite_img.get_rect(center=attack_rect.center)
+            if camera is not None:
+                ds.blit(bite_img, camera.apply(bite_rect))
             else:
-                attack_rect = self.get_attack_rect()
-                for ab in getattr(self, 'abilities', []):
-                    # 多重撕咬能力的可视化
-                    if hasattr(ab, 'ability_name') and ab.ability_name == "多重撕咬":
-                        bite_idx = min(self.bite_frame // 2, len(self.bite_images) - 1)
-                        bite_img = pygame.transform.scale(self.bite_images[bite_idx], (attack_rect.width, attack_rect.height))
-                        center = pygame.Vector2(self.getrect().center)
-                        angle_list = [60,0,-60]
-                        for angle in angle_list:
-                            offset = pygame.Vector2(attack_rect.center) - center
-                            rad = math.radians(angle)
-                            rot_offset = pygame.Vector2(
-                                offset.x * math.cos(rad) - offset.y * math.sin(rad),
-                                offset.x * math.sin(rad) + offset.y * math.cos(rad)
-                            )
-                            new_center = center + rot_offset
-                            bite_rect = attack_rect.copy()
-                            bite_rect.center = (int(new_center.x), int(new_center.y))
-                            if camera is not None:
-                                ds.blit(bite_img, camera.apply(bite_rect))
-                            else:
-                                ds.blit(bite_img, bite_rect)
-                # 可扩展：其他攻击能力类型的判定区域可视化
+                ds.blit(bite_img, bite_rect)
         # 半身穿墙效果：左边超界时右侧补绘
         if self.pos[0] < 0:
             temp_rect = self.getrect().copy()
@@ -252,48 +248,88 @@ class Image(pygame.sprite.Sprite):
             self.ativate = False
             const.FullSrceen_Switch = not const.FullSrceen_Switch
         return const.FullSrceen_Switch
-    def start_attack(self):
-        if not self.is_attacking:
-            self.is_attacking = True
-            self.attack_frame = 0
-            self.attack_hit_enemies = []  # 攻击开始时清空
+    def update_attack_timer(self, dt=const.FIXED_DT):
+        """按经过的秒数推进攻击冷却。"""
+        self.attack_timer = max(0.0, self.attack_timer - dt)
 
-    def play_attack_animation(self, animation_len=5):
+    def attack_ready(self):
+        """是否可以再次出手。"""
+        return self.attack_timer <= 0 and not self.is_attacking
+
+    def attack_ready_ratio(self):
+        """攻击冷却进度（0=刚出手，1=可以出手），供 HUD 画冷却环。"""
+        if self.attack_interval <= 0:
+            return 1.0
+        return max(0.0, min(1.0, 1.0 - self.attack_timer / self.attack_interval))
+
+    def start_attack(self):
+        """开始一次攻击；冷却中或正在出手时返回 False。"""
+        if self.is_attacking or self.attack_timer > 0:
+            return False
+        self.is_attacking = True
+        self.attack_frame = 0.0
+        self.attack_hit_enemies = []  # 攻击开始时清空
+        self.attack_timer = self.attack_interval
+        self.notify_attack_start()
+        return True
+
+    def notify_attack_start(self):
+        """通知所有能力「玩家刚出手」，供旋风撕咬等需要一次性触发的效果使用。"""
+        for ab in list(getattr(self, 'abilities', [])):
+            ab.on_attack_start(self)
+
+    def attack_angles(self):
+        """本次攻击覆盖的角度列表：0 为主判定区方向，其余来自多重撕咬等能力。"""
+        angles = [0.0]
+        for ab in list(getattr(self, 'abilities', [])):
+            angles.extend(ab.attack_extra_angles())
+        return angles
+
+    def play_attack_animation(self, dt=const.FIXED_DT, animation_len=5):
         if self.is_attacking:
-            idx = min(self.attack_frame // max(1, self.attack_cooldown // animation_len), len(self.attack_paths) - 1)
+            progress = min(1.0, self.attack_frame / max(self.attack_cooldown, 1e-6))
+            idx = min(int(progress * animation_len), len(self.attack_paths) - 1)
             path = self.attack_paths[idx]
             self.original_image = pygame.image.load(path).convert_alpha()
             self.original_image = pygame.transform.scale(self.original_image, self.size)
             self.image = pygame.transform.flip(self.original_image, not self.facing_left, False)
-            self.attack_frame += 1
+            self.attack_frame += dt
             # 播放咬合动画
             if not self.bite_animating:
                 self.bite_animating = True
                 self.bite_frame = 0
             if self.bite_animating:
-                self.bite_frame += 1
-                if self.bite_frame >= len(self.bite_images) * 2:
-                    self.bite_animating = False
+                self.bite_frame = min(
+                    int(progress * len(self.bite_images) * 2),
+                    len(self.bite_images) * 2 - 1,
+                )
             # 能力动画帧同步（如多重撕咬等能力）
             for ab in getattr(self, 'abilities', []):
                 if hasattr(ab, 'on_attack_animation'):
                     ab.on_attack_animation(self)
-            if self.attack_frame >= self.attack_cooldown:
+            if self.attack_frame + const.TIME_EPSILON >= self.attack_cooldown:
                 self.is_attacking = False
-                self.attack_frame = 0
+                self.attack_frame = 0.0
                 self.attack_hit_enemies = []  # 攻击动画结束时清空
                 self.bite_animating = False
         else:
             self.reloade()
 
-    def get_attack_rect(self, width_scale=0.5, height_scale=1.0, offset_x=0, offset_y=0):
+    def get_attack_rect(self, width_scale=None, height_scale=None, offset_x=None, offset_y=0):
         """
         获取攻击判定区域，可自定义大小和位置偏移。
+        参数为 None 时使用实例属性（可被「长臂」等能力修改）：
         width_scale: 攻击区域宽度占自身宽度比例（默认0.5）
         height_scale: 攻击区域高度占自身高度比例（默认1.0）
         offset_x: 攻击区域在x方向的偏移（默认0，正值向前方）
         offset_y: 攻击区域在y方向的偏移（默认0，正值向下）
         """
+        if width_scale is None:
+            width_scale = getattr(self, 'attack_width_scale', 0.5)
+        if height_scale is None:
+            height_scale = getattr(self, 'attack_height_scale', 1.0)
+        if offset_x is None:
+            offset_x = getattr(self, 'attack_offset_x', 0)
         # 获取玩家自身的矩形
         player_rect = self.getrect()
         attack_width = int(player_rect.width * width_scale)
@@ -348,19 +384,75 @@ class Image(pygame.sprite.Sprite):
         pygame.display.flip()
         pygame.time.Clock().tick(const.fps)
 
+    # ---------------- 能力系统接口 ----------------
     def add_ability(self, ability_obj):
+        """获得能力：已拥有同类能力则叠加层数并再次生效，否则加入能力列表。
+
+        已经满层的能力不会重复生效，直接返回已有实例。
+        """
+        for owned in self.abilities:
+            if type(owned) is type(ability_obj):
+                if owned.max_stack > 0 and owned.stack >= owned.max_stack:
+                    return owned  # 已满层：不叠层也不重复生效
+                owned.stack += 1
+                owned.apply_to_player(self)
+                return owned
+        ability_obj.stack = 1
         self.abilities.append(ability_obj)
         ability_obj.apply_to_player(self)
+        return ability_obj
+
+    def has_ability(self, ability_cls):
+        """判断是否已拥有某个能力（含子类）。"""
+        return any(isinstance(ab, ability_cls) for ab in self.abilities)
 
     def attack_with_abilities(self, target_group):
         """攻击时调用所有能力的on_attack，返回所有命中的敌人"""
         hit_enemies = []
-        for ab in self.abilities:
-            if hasattr(ab, 'on_attack'):
-                result = ab.on_attack(self, target_group)
-                if result:
-                    hit_enemies.extend(result)
+        for ab in list(self.abilities):
+            result = ab.on_attack(self, target_group)
+            if result:
+                hit_enemies.extend(result)
         return hit_enemies
+
+    def update_abilities(self, level=None, dt=const.FIXED_DT):
+        """按经过的秒数更新雷霆领域等周期性能力。"""
+        for ab in list(self.abilities):
+            ab.on_update(self, level, dt)
+
+    def notify_kill(self, enemy):
+        """击杀敌人后通知所有能力。"""
+        for ab in list(self.abilities):
+            ab.on_kill(self, enemy)
+
+    def notify_defend(self, level=None):
+        """玩家受到伤害后通知所有能力。"""
+        for ab in list(self.abilities):
+            ab.on_defend(self, level)
+
+    def take_pending_kills(self):
+        """取出并清空能力造成的击杀，交由关卡统一结算。"""
+        kills = self.pending_kills
+        self.pending_kills = []
+        return kills
+
+    def grow_on_kill(self, base_w=6, base_h=4):
+        """击杀成长（受「掠食本能」倍率影响）。"""
+        self.change_rect(base_w * self.growth_scale, base_h * self.growth_scale)
+
+    def shrink(self, add_w, add_h):
+        """统一的体型变化入口：负向变化会被「铁壁」等能力减免。"""
+        resist = getattr(self, 'shrink_resist', 0.0)
+        if add_w < 0:
+            add_w *= (1 - resist)
+        if add_h < 0:
+            add_h *= (1 - resist)
+        self.change_rect(add_w, add_h)
+
+    def draw_abilities(self, ds, camera=None):
+        """绘制能力附加的视觉表现（额外判定区、领域光环等）。"""
+        for ab in list(self.abilities):
+            ab.draw_effect(self, ds, camera)
 class mFont(pygame.sprite.Sprite):
     _instances = []
     def __init__(self,title, font_path, size, color=None,pos=(0,0)):
