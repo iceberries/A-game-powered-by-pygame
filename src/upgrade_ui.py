@@ -6,6 +6,7 @@ import numpy as np
 from scipy.ndimage import gaussian_filter
 import const
 import ability
+from core.assets import ASSETS
 
 
 class UpgradeOption:
@@ -119,11 +120,11 @@ class UpgradeUI:
         path = "font/BoutiqueBitmap9x9_Bold_1.9.ttf"
         scale = self._scale()
         return {
-            'title': pygame.font.Font(path, max(14, int(40 * scale))),
-            'card_title': pygame.font.Font(path, max(12, int(26 * scale))),
-            'desc': pygame.font.Font(path, max(10, int(19 * scale))),
-            'small': pygame.font.Font(path, max(9, int(17 * scale))),
-            'icon': pygame.font.Font(path, max(18, int(44 * scale))),
+            'title': ASSETS.font(path, max(14, int(40 * scale))),
+            'card_title': ASSETS.font(path, max(12, int(26 * scale))),
+            'desc': ASSETS.font(path, max(10, int(19 * scale))),
+            'small': ASSETS.font(path, max(9, int(17 * scale))),
+            'icon': ASSETS.font(path, max(18, int(44 * scale))),
         }
 
     def layout(self):
@@ -255,7 +256,7 @@ class UpgradeUI:
                     pygame.quit()
                     sys.exit()
                 if event.type == pygame.VIDEORESIZE:
-                    const.wsize, const.hsize = event.w, event.h
+                    const.set_resolution(event.w, event.h)
                     screen = pygame.display.set_mode((const.wsize, const.hsize), pygame.RESIZABLE)
                     if redraw_callback:
                         redraw_callback()  # 先让主游戏在新窗口上重绘一帧

@@ -3,6 +3,9 @@ import random
 import math
 import pygame
 import const
+from core.assets import ASSETS
+from core.game_rules import DEFAULT_RULES
+from core.state import GAME_CONFIG
 class Enemy(Image, pygame.sprite.Sprite):
     SPRITE_PATH = 'picture/Enemy/%d.png'  # 行走动画贴图（子类可覆盖）
     FRAME_NUM = 3                         # 行走动画帧数（子类可覆盖）
@@ -19,38 +22,26 @@ class Enemy(Image, pygame.sprite.Sprite):
         self.player = player
         self.speed = speed
         self.pos = [x, y]
+        self.velocity = pygame.Vector2(0, 0)
         self.facing_left = side == 'left'
         self.original_image = self.image.copy() if hasattr(self.image, 'copy') else self.image
         self.runaway_timer = 0.0  # 逃跑剩余时间（秒）
         self.max_hp = const.Enemy_HP
         self.hp = self.max_hp
 
-    def update_boids(self, enemies, separation_weight=0.8, alignment_weight=0.6, cohesion_weight=0.5, neighbor_radius=20):
-        separation = pygame.Vector2(0, 0)
-        alignment = pygame.Vector2(0, 0)
-        cohesion = pygame.Vector2(0, 0)
-        count = 0
+    def update_boids(self, enemies):
+        """通过与服务器相同的纯规则计算 Boids 向量。"""
         my_center = pygame.Vector2(self.getrect().center)
+        neighbors = []
         for other in enemies:
             if other is self:
                 continue
             other_center = pygame.Vector2(other.getrect().center)
-            dist = my_center.distance_to(other_center)
-            if dist < neighbor_radius:
-                separation += (my_center - other_center) / (dist + 1e-5)
-                alignment += pygame.Vector2(other.speed if hasattr(other, 'speed') else 2, 0)
-                cohesion += other_center
-                count += 1
-        if count > 0:
-            separation /= count
-            alignment /= count
-            cohesion = (cohesion / count - my_center)
-        boid_vec = separation * separation_weight + alignment * alignment_weight + cohesion * cohesion_weight
-        # 限制boid_vec最大幅度，防止横跳
-        max_boid = self.speed * 0.8
-        if boid_vec.length() > max_boid:
-            boid_vec = boid_vec.normalize() * max_boid
-        return boid_vec
+            velocity = getattr(other, 'velocity', pygame.Vector2(0, 0))
+            neighbors.append((other_center, velocity))
+        return pygame.Vector2(DEFAULT_RULES.flocking_vector(
+            my_center, self.speed, neighbors,
+        ))
 
     def hp_caculater(self, damage):
         self.hp -= damage
@@ -160,13 +151,13 @@ class Enemy(Image, pygame.sprite.Sprite):
                 attack_center, keep_distance, runaway_duration, 1, dt)
             if not runaway:
                 move_vec = to_target.normalize() * self.speed
-        # 群体智能分布
+        # 群体智能分布。必须先计算 Boids 向量，再合成最终移动向量。
         boid_vec = pygame.Vector2(0, 0)
-        final_vec = move_vec + boid_vec
         if enemies is not None:
             self.avoid_overlap(enemies,3)
-            if hasattr(self, 'update_boids'):
-                boid_vec = self.update_boids(enemies)
+            boid_vec = self.update_boids(enemies)
+        final_vec = move_vec + boid_vec
+        self.velocity = final_vec
         self.pos[0] += final_vec.x * dt
         self.pos[1] += final_vec.y * dt
         prev_facing = self.facing_left
@@ -176,12 +167,15 @@ class Enemy(Image, pygame.sprite.Sprite):
         self.reloade()
 
 class AttackEnemy(Enemy):
+    """会追击并攻击玩家的大鸡，使用 picture/Enemy 的行走、攻击帧。"""
     def __init__(self, player, size=(80, 80), speed=120):
         super().__init__(player, size, speed)
         self.max_hp = const.AttackEnemy_HP
         self.hp = self.max_hp
         self.walk_paths = ['picture/Enemy/1.PNG', 'picture/Enemy/2.PNG', 'picture/Enemy/3.PNG']
         self.attack_paths = ['picture/Enemy/AT0.PNG', 'picture/Enemy/AT1.PNG', 'picture/Enemy/AT2.PNG']
+        ASSETS.animation(self.walk_paths + self.attack_paths, self.size)
+        ASSETS.animation(self.walk_paths + self.attack_paths, self.size, True)
         self.is_attacking = False
         self.attack_frame = 0.0
         self.attack_cooldown = 20 / 60  # 攻击动画时长（秒）
@@ -212,6 +206,7 @@ class AttackEnemy(Enemy):
         if player_vec.length() > 0:
             player_vec = player_vec.normalize() * self.speed
         final_vec = player_vec + boid_vec
+        self.velocity = final_vec
         self.pos[0] += final_vec.x * dt
         self.pos[1] += final_vec.y * dt
         prev_facing = self.facing_left
@@ -226,9 +221,8 @@ class AttackEnemy(Enemy):
             progress = min(1.0, self.attack_frame / max(self.attack_cooldown, 1e-6))
             idx = min(int(progress * len(self.attack_paths)), len(self.attack_paths) - 1)
             path = self.attack_paths[idx]
-            self.original_image = pygame.image.load(path).convert_alpha()
-            self.original_image = pygame.transform.scale(self.original_image, self.size)
-            self.image = pygame.transform.flip(self.original_image, not self.facing_left, False)
+            self.original_image = ASSETS.image(path, self.size)
+            self.image = ASSETS.image(path, self.size, not self.facing_left)
             self.attack_frame += dt
             if self.attack_frame + const.TIME_EPSILON >= self.attack_cooldown:
                 self.is_attacking = False
@@ -238,10 +232,9 @@ class AttackEnemy(Enemy):
             # 行走动画
             idx = (self.Record % 3)
             path = self.walk_paths[idx]
-            self.original_image = pygame.image.load(path).convert_alpha()
-            self.original_image = pygame.transform.scale(self.original_image, self.size)
-            self.image = pygame.transform.flip(self.original_image, not self.facing_left, False)
-            self.updataRecord(self.Record + 1)
+            self.original_image = ASSETS.image(path, self.size)
+            self.image = ASSETS.image(path, self.size, not self.facing_left)
+            self.Record = self.Index if self.Record + 1 > len(self.walk_paths) else self.Record + 1
 
     def try_attack(self):
         if self.is_attacking:
@@ -263,9 +256,9 @@ class AttackEnemy(Enemy):
         self.hp = self.max_hp
 
 
-class RewardChick(Enemy):
+class GreenCapoo(Enemy):
     """
-    绿色奖励小鸡：前期少量出现，不会攻击玩家。
+    绿色 Capoo：前 60 秒成批出现的奖励单位，不会攻击玩家。
 
     被咬到（1 点血，任何一次攻击都能吃掉）后给玩家一大口体型成长与额外分数，
     用来帮玩家度过体型衰减最快的开局阶段。
@@ -273,13 +266,14 @@ class RewardChick(Enemy):
     SPRITE_PATH = 'picture/Capoo/%d.PNG'   # 复用主角贴图，染成绿色
     FRAME_NUM = 8
     TINT = (110, 255, 120)                 # 绿色染色（BLEND_RGBA_MULT）
-    GROWTH = (20, 14)                      # 吃掉后的体型成长（远大于普通击杀的 6/4）
+    GROWTH = GAME_CONFIG.green_capoo_growth
 
-    def __init__(self, player, size=(44, 32), speed=180):
+    def __init__(self, player, size=GAME_CONFIG.green_capoo_size,
+                 speed=GAME_CONFIG.green_capoo_speed):
         super().__init__(player, size, speed)
         self.max_hp = 1
         self.hp = self.max_hp
-        self.wobble = random.uniform(0, math.tau)
+        self.orbit_direction = random.choice((-1, 1))
 
     def reloade(self):
         """每次动画换帧后重新染成绿色（父类会重新加载原始贴图）。"""
@@ -295,15 +289,17 @@ class RewardChick(Enemy):
         return tinted
 
     def move_towards_player(self, enemies=None, dt=const.FIXED_DT):
-        """慢悠悠地摇向玩家，方便被咬到；不参与攻击。"""
+        """接近玩家后按体型安全距离环绕，始终可被攻击判定触及。"""
         if enemies is not None:
             self.avoid_overlap(enemies, 2)
-        self.wobble += 0.12
         px, py = self.player.getrect().center
         ex, ey = self.getrect().center
-        vec = pygame.Vector2(px - ex, py - ey)
-        if vec.length() > 1:
-            vec = vec.normalize().rotate(math.sin(self.wobble) * 14) * self.speed
+        velocity_x, velocity_y, _ = DEFAULT_RULES.green_capoo_orbit_velocity(
+            (ex, ey), (px, py), self.player.size, self.size, self.speed,
+            self.orbit_direction,
+        )
+        vec = pygame.Vector2(velocity_x, velocity_y)
+        self.velocity = vec
         self.pos[0] += vec.x * dt
         self.pos[1] += vec.y * dt
         prev_facing = self.facing_left
@@ -319,17 +315,8 @@ class RewardChick(Enemy):
         # 头顶绿色小环，提示这是可吃掉的奖励
         pygame.draw.circle(ds, (120, 255, 140), (rect.centerx, rect.top - 6), 6, 2)
 
-    def start_attack(self):
-        if not hasattr(self, 'is_attacking'):
-            self.is_attacking = False
-        if not hasattr(self, 'attack_frame'):
-            self.attack_frame = 0
-        if not self.is_attacking:
-            self.is_attacking = True
-            self.attack_frame = 0
 
-    def draw(self, ds, camera=None):
-        if camera is not None:
-            ds.blit(self.image, camera.apply(self.getrect()))
-        else:
-            ds.blit(self.image, self.getrect())
+# 名称兼容旧存档/旧导入；游戏内统一显示为“绿 Capoo”。
+RewardChick = GreenCapoo
+# 新的领域名称；保留 AttackEnemy 兼容原有导入。
+AttackChicken = AttackEnemy

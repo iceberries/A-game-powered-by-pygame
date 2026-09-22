@@ -1,8 +1,12 @@
 import pygame
-import const
 import random
 import ability
 import math
+from core.assets import ASSETS
+from core.game_rules import DEFAULT_RULES
+from core.state import DISPLAY_SETTINGS, GAME_CONFIG
+
+
 class Image(pygame.sprite.Sprite):
     def load_image(self, pathFmt):
         """
@@ -16,15 +20,11 @@ class Image(pygame.sprite.Sprite):
             original_image = image.copy()
         else:
             if self.total_num > 1:
-                image = pygame.image.load(self.path % self.Index).convert_alpha()
-                image = pygame.transform.scale(image, self.size)
-                original_image = image
-                image = pygame.transform.flip(original_image, not self.facing_left, False)
+                path = self.path % self.Index
             else:
-                image = pygame.image.load(self.path).convert_alpha()
-                image = pygame.transform.scale(image, self.size)
-                original_image = image
-                image = pygame.transform.flip(original_image, not self.facing_left, False)
+                path = self.path
+            original_image = ASSETS.image(path, self.size)
+            image = ASSETS.image(path, self.size, not self.facing_left)
         return image, original_image
 
     def __init__(self, pathFmt, size, pos, Index, Total_num = 1, Record = 0, facing_left = True):#Index起始位置，Total_num总张数
@@ -44,12 +44,28 @@ class Image(pygame.sprite.Sprite):
         self.input_handler = None
         self.is_attacking = False
         self.attack_frame = 0.0
-        self.attack_cooldown = 10 / 60  # 攻击动画时长（秒）
-        self.attack_interval = 1.0  # 攻击冷却（秒），可被「迅捷撕咬」缩短
+        self.attack_cooldown = GAME_CONFIG.player_attack_duration
+        self.attack_interval = GAME_CONFIG.player_attack_interval
         self.attack_timer = 0.0  # 剩余冷却时间（秒）
         self.attack_paths = ['picture/Capoo/AT/AT0.png', 'picture/Capoo/AT/AT1.png', 'picture/Capoo/AT/AT2.png', 'picture/Capoo/AT/AT3.png', 'picture/Capoo/AT/AT4.png']
-        self.attack_damage = 25  # 玩家攻击伤害，固定为25
-        self.move_speed = 600.0  # 移动速度（像素/秒，可被能力提升）
+        if self.path.strip():
+            if self.total_num > 1:
+                frame_paths = [
+                    self.path % index
+                    for index in range(self.Index, self.total_num + 1)
+                ]
+            else:
+                frame_paths = [self.path]
+            ASSETS.animation(frame_paths, self.size)
+            ASSETS.animation(frame_paths, self.size, True)
+        is_capoo_animation = (
+            'capoo' in self.path.casefold() and self.total_num > 1
+        )
+        if is_capoo_animation:
+            ASSETS.animation(self.attack_paths, self.size)
+            ASSETS.animation(self.attack_paths, self.size, True)
+        self.attack_damage = GAME_CONFIG.player_attack_damage
+        self.move_speed = GAME_CONFIG.player_speed
         self.attack_width_scale = 0.5  # 攻击判定宽度比例（可被能力提升）
         self.attack_height_scale = 1.0  # 攻击判定高度比例（可被能力提升）
         self.attack_offset_x = 0  # 攻击判定x方向偏移
@@ -57,7 +73,10 @@ class Image(pygame.sprite.Sprite):
         self.growth_scale = 1.0  # 击杀成长倍率
         self.attack_hit_enemies = []  # 记录本次攻击已命中的敌人
         self.bite_paths = [f'picture/bites/{i}.png' for i in range(3)]
-        self.bite_images = [pygame.image.load(path).convert_alpha() for path in self.bite_paths]
+        self.bite_images = (
+            list(ASSETS.animation(self.bite_paths))
+            if is_capoo_animation else []
+        )
         self.bite_frame = 0
         self.bite_animating = False
         self.bite_pos = (0, 0)
@@ -72,23 +91,26 @@ class Image(pygame.sprite.Sprite):
 
     def change_rect(self,add_wide,add_hight):
         # 体型只保底、不设上限：衰减到下限即“体型归零”，由关卡判定游戏结束
-        new_w, new_h = const.clamp_capoo_size(self.size[0] + add_wide, self.size[1] + add_hight)
+        new_w, new_h = DEFAULT_RULES.clamp_size(
+            self.size[0] + add_wide, self.size[1] + add_hight,
+        )
         if abs(new_w - self.size[0]) < 1e-6 and abs(new_h - self.size[1]) < 1e-6:
             return  # 已在下限，跳过缩放（也避免每帧重复生成表面）
         self.size = (new_w, new_h)  # 修改 size 属性
-        self.image = pygame.transform.scale(self.image, (int(new_w), int(new_h)))  # 调整 image 的大小
+        self.reloade()
         self.rect = self.getrect()  # 更新 rect 的位置
 
     def is_min_size(self):
         """体型是否已衰减到下限（体型归零 → 关卡判定游戏结束）。"""
-        return (self.size[0] <= const.capoo_min_width + 1e-6 or
-                self.size[1] <= const.capoo_min_hight + 1e-6)
+        min_width, min_height = GAME_CONFIG.player_min_size
+        return (self.size[0] <= min_width + 1e-6 or
+                self.size[1] <= min_height + 1e-6)
     
     def get_hitbox(self,wide,hight):
         hitbox = self.getrect().inflate((wide,hight))
         return hitbox
 
-    def Player_move(self, enemy_group=None, attack_enemy_group=None, dt=const.FIXED_DT):
+    def Player_move(self, enemy_group=None, attack_enemy_group=None, dt=GAME_CONFIG.fixed_dt):
         self.is_walking = False
         prev_facing = self.facing_left
         keys = pygame.key.get_pressed()
@@ -117,11 +139,14 @@ class Image(pygame.sprite.Sprite):
             new_rect = self.getrect().copy()
             new_rect.x += move_x
             new_rect.y += move_y
-            new_mask = pygame.mask.from_surface(self.image)
+            new_mask = self.get_mask()
             if enemy_group is not None:
                 for enemy in enemy_group:
+                    enemy_rect = enemy.getrect()
+                    if not new_rect.colliderect(enemy_rect):
+                        continue
                     enemy_mask = enemy.get_mask()
-                    offset = (enemy.getrect().x - new_rect.x, enemy.getrect().y - new_rect.y)
+                    offset = (enemy_rect.x - new_rect.x, enemy_rect.y - new_rect.y)
                     if new_mask.overlap(enemy_mask, offset):
                         # 计算分离向量
                         my_center = pygame.Vector2(new_rect.center)
@@ -131,8 +156,11 @@ class Image(pygame.sprite.Sprite):
                             push_vec += vec.normalize()
             if attack_enemy_group is not None:
                 for enemy in attack_enemy_group:
+                    enemy_rect = enemy.getrect()
+                    if not new_rect.colliderect(enemy_rect):
+                        continue
                     enemy_mask = enemy.get_mask()
-                    offset = (enemy.getrect().x - new_rect.x, enemy.getrect().y - new_rect.y)
+                    offset = (enemy_rect.x - new_rect.x, enemy_rect.y - new_rect.y)
                     if new_mask.overlap(enemy_mask, offset):
                         my_center = pygame.Vector2(new_rect.center)
                         enemy_center = pygame.Vector2(enemy.getrect().center)
@@ -157,22 +185,16 @@ class Image(pygame.sprite.Sprite):
             if self.total_num > 1:
                 if self.Record <= self.total_num:
                     path = self.path % self.Record
-                    self.original_image = pygame.image.load(path).convert_alpha()
                 else:
                     self.Record = self.Index
                     path = self.path % self.Record
-                    self.original_image = pygame.image.load(path).convert_alpha()
-                
-                self.original_image = pygame.transform.scale(self.original_image, self.size)
-                self.image = pygame.transform.flip(self.original_image, not self.facing_left, False)
             else:
-                self.original_image = pygame.image.load(self.path).convert_alpha()
-                self.original_image = pygame.transform.scale(self.original_image, self.size)
-                self.image = pygame.transform.flip(self.original_image, not self.facing_left, False)
+                path = self.path
+            self.original_image = ASSETS.image(path, self.size)
+            self.image = ASSETS.image(path, self.size, not self.facing_left)
 
     def updatasize(self,size):
         self.size=size
-        self.image = pygame.transform.scale(self.image,self.size)
         self.reloade()
         
     def updataRecord(self,Record):
@@ -195,7 +217,10 @@ class Image(pygame.sprite.Sprite):
         if self.is_attacking or self.bite_animating:
             attack_rect = self.get_attack_rect()
             bite_idx = min(self.bite_frame // 2, len(self.bite_images) - 1)
-            bite_img = pygame.transform.scale(self.bite_images[bite_idx], (attack_rect.width, attack_rect.height))
+            bite_img = ASSETS.image(
+                self.bite_paths[bite_idx],
+                (attack_rect.width, attack_rect.height),
+            )
             bite_rect = bite_img.get_rect(center=attack_rect.center)
             if camera is not None:
                 ds.blit(bite_img, camera.apply(bite_rect))
@@ -204,22 +229,27 @@ class Image(pygame.sprite.Sprite):
         # 半身穿墙效果：左边超界时右侧补绘
         if self.pos[0] < 0:
             temp_rect = self.getrect().copy()
-            temp_rect.x = self.pos[0] + const.wsize
+            temp_rect.x = self.pos[0] + DISPLAY_SETTINGS.width
             if camera is not None:
                 ds.blit(self.image, camera.apply(temp_rect))
             else:
                 ds.blit(self.image, temp_rect)
         # 右边超界时左侧补绘
-        elif self.pos[0] + self.size[0] > const.wsize:
+        elif self.pos[0] + self.size[0] > DISPLAY_SETTINGS.width:
             temp_rect = self.getrect().copy()
-            temp_rect.x = self.pos[0] - const.wsize
+            temp_rect.x = self.pos[0] - DISPLAY_SETTINGS.width
             if camera is not None:
                 ds.blit(self.image, camera.apply(temp_rect))
             else:
                 ds.blit(self.image, temp_rect)
 
     def get_initial_position(self):
-        return (const.wsize+50,random.randrange(int(const.hsize/2), int(const.hsize)))
+        return (
+            DISPLAY_SETTINGS.width + 50,
+            random.randrange(
+                int(DISPLAY_SETTINGS.height / 2), DISPLAY_SETTINGS.height,
+            ),
+        )
 
     def change_path(self, new_path):
         """
@@ -246,9 +276,9 @@ class Image(pygame.sprite.Sprite):
         # 状态切换和返回结果
         if self.ativate:
             self.ativate = False
-            const.FullSrceen_Switch = not const.FullSrceen_Switch
-        return const.FullSrceen_Switch
-    def update_attack_timer(self, dt=const.FIXED_DT):
+            DISPLAY_SETTINGS.fullscreen = not DISPLAY_SETTINGS.fullscreen
+        return DISPLAY_SETTINGS.fullscreen
+    def update_attack_timer(self, dt=GAME_CONFIG.fixed_dt):
         """按经过的秒数推进攻击冷却。"""
         self.attack_timer = max(0.0, self.attack_timer - dt)
 
@@ -285,14 +315,13 @@ class Image(pygame.sprite.Sprite):
             angles.extend(ab.attack_extra_angles())
         return angles
 
-    def play_attack_animation(self, dt=const.FIXED_DT, animation_len=5):
+    def play_attack_animation(self, dt=GAME_CONFIG.fixed_dt, animation_len=5):
         if self.is_attacking:
             progress = min(1.0, self.attack_frame / max(self.attack_cooldown, 1e-6))
             idx = min(int(progress * animation_len), len(self.attack_paths) - 1)
             path = self.attack_paths[idx]
-            self.original_image = pygame.image.load(path).convert_alpha()
-            self.original_image = pygame.transform.scale(self.original_image, self.size)
-            self.image = pygame.transform.flip(self.original_image, not self.facing_left, False)
+            self.original_image = ASSETS.image(path, self.size)
+            self.image = ASSETS.image(path, self.size, not self.facing_left)
             self.attack_frame += dt
             # 播放咬合动画
             if not self.bite_animating:
@@ -307,7 +336,7 @@ class Image(pygame.sprite.Sprite):
             for ab in getattr(self, 'abilities', []):
                 if hasattr(ab, 'on_attack_animation'):
                     ab.on_attack_animation(self)
-            if self.attack_frame + const.TIME_EPSILON >= self.attack_cooldown:
+            if self.attack_frame + GAME_CONFIG.time_epsilon >= self.attack_cooldown:
                 self.is_attacking = False
                 self.attack_frame = 0.0
                 self.attack_hit_enemies = []  # 攻击动画结束时清空
@@ -330,17 +359,15 @@ class Image(pygame.sprite.Sprite):
             height_scale = getattr(self, 'attack_height_scale', 1.0)
         if offset_x is None:
             offset_x = getattr(self, 'attack_offset_x', 0)
-        # 获取玩家自身的矩形
-        player_rect = self.getrect()
-        attack_width = int(player_rect.width * width_scale)
-        attack_height = int(player_rect.height * height_scale)
-        attack_rect = pygame.Rect(0, 0, attack_width, attack_height)
-        if self.facing_left:
-            attack_rect.left = player_rect.left - attack_width * 3 // 4 + offset_x
-        else:
-            attack_rect.left = player_rect.left + player_rect.width - attack_width // 4 + offset_x
-        attack_rect.top = player_rect.top + offset_y
-        return attack_rect
+        left, top, width, height = DEFAULT_RULES.attack_rect(
+            self.pos, self.size, self.facing_left,
+            width_scale=width_scale,
+            height_scale=height_scale,
+        )
+        return pygame.Rect(
+            int(left + offset_x), int(top + offset_y),
+            max(1, int(width)), max(1, int(height)),
+        )
 
     def try_attack(self, target_rect=None, width_scale=0.5, height_scale=1.0, offset_x=0, offset_y=0):
         """
@@ -360,7 +387,10 @@ class Image(pygame.sprite.Sprite):
         return False
 
     def get_mask(self):
-        return pygame.mask.from_surface(self.image)
+        if getattr(self, '_mask_source', None) is not self.image:
+            self._mask_source = self.image
+            self._mask_cache = pygame.mask.from_surface(self.image)
+        return self._mask_cache
     @staticmethod
     def draw_scene(ds, background, game_exit_font, score, capoo_surface, enemies):
         """
@@ -376,13 +406,13 @@ class Image(pygame.sprite.Sprite):
         background.draw(ds)
         game_exit_font.fdraw(ds)
         from image import mFont  # 避免静态方法引用类属性
-        score_surface = mFont("score:" + str(score), 'font/BoutiqueBitmap9x9_Bold_1.9.ttf', 50, (230, 100, 150), (const.wsize, 160))
+        score_surface = mFont("score:" + str(score), 'font/BoutiqueBitmap9x9_Bold_1.9.ttf', 50, (230, 100, 150), (DISPLAY_SETTINGS.width, 160))
         score_surface.fdraw(ds)
         capoo_surface.draw(ds)
         for enemy in enemies:
             enemy.draw(ds)
         pygame.display.flip()
-        pygame.time.Clock().tick(const.fps)
+        pygame.time.Clock().tick(GAME_CONFIG.simulation_hz)
 
     # ---------------- 能力系统接口 ----------------
     def add_ability(self, ability_obj):
@@ -415,7 +445,7 @@ class Image(pygame.sprite.Sprite):
                 hit_enemies.extend(result)
         return hit_enemies
 
-    def update_abilities(self, level=None, dt=const.FIXED_DT):
+    def update_abilities(self, level=None, dt=GAME_CONFIG.fixed_dt):
         """按经过的秒数更新雷霆领域等周期性能力。"""
         for ab in list(self.abilities):
             ab.on_update(self, level, dt)
@@ -436,8 +466,10 @@ class Image(pygame.sprite.Sprite):
         self.pending_kills = []
         return kills
 
-    def grow_on_kill(self, base_w=6, base_h=4):
+    def grow_on_kill(self, base_w=None, base_h=None):
         """击杀成长（受「掠食本能」倍率影响）。"""
+        if base_w is None or base_h is None:
+            base_w, base_h = GAME_CONFIG.kill_growth
         self.change_rect(base_w * self.growth_scale, base_h * self.growth_scale)
 
     def shrink(self, add_w, add_h):
@@ -460,8 +492,10 @@ class mFont(pygame.sprite.Sprite):
         self.path=font_path
         self.size=size
         self.color=color
-        self.mfont = pygame.font.Font(self.path, self.size)
-        self.text = self.mfont.render(self.title, True, self.color)
+        self.mfont = ASSETS.font(self.path, self.size)
+        self.text = ASSETS.text(
+            self.title, self.path, self.size, self.color,
+        )
         self.rect = self.text.get_rect()
         self.pos = list(pos)
         self.pos = [pos[0] - int(self.rect.width), pos[1]]
@@ -487,8 +521,10 @@ class mFont(pygame.sprite.Sprite):
 
     def updatasize(self,size):
         self.size = size  # 更新为新的字体大小
-        self.mfont = pygame.font.Font(self.path, self.size)  # 重新加载字体
-        self.text = self.mfont.render(self.title, True, self.color)  # 重新渲染文本
+        self.mfont = ASSETS.font(self.path, self.size)
+        self.text = ASSETS.text(
+            self.title, self.path, self.size, self.color,
+        )
         self.rect = self.getrect()  # 更新文本的矩形
     
     def Button(self,events,target_state=None):
@@ -531,17 +567,16 @@ class Slider(Image):
                 Total_num=1, Record=0, facing_left=True):
         super().__init__(handle_path, size, pos, Index, Total_num, Record, facing_left)
         self.image_size = image_size  # 滑块大小
-        self.handle_image = pygame.image.load(handle_path).convert_alpha()
-        self.handle_image = pygame.transform.scale(self.handle_image, self.image_size)
+        self.handle_image = ASSETS.image(handle_path, self.image_size)
         self.handle_rect = self.handle_image.get_rect()
         # 滑块特有属性
         self.min_val = min_val
         self.max_val = max_val
         self.handle_radius = handle_radius
-        self.value = const.bgm_vol  # 初始值
+        self.value = DISPLAY_SETTINGS.bgm_volume
         self.dragging = False
         self.handle_color = (40, 120, 200)    # 滑块颜色
-        self.font = pygame.font.SysFont('Arial', 20)
+        self.font = ASSETS.system_font('Arial', 20)
         self.show_value = True
         
         # 覆盖父类属性
@@ -572,7 +607,7 @@ class Slider(Image):
         rect = self.getrect()
         mouse_x = max(rect.left, min(mouse_x, rect.right))
         self.value = self.min_val + (mouse_x - rect.left) / rect.width * (self.max_val - self.min_val)
-        const.bgm_vol = self.value
+        DISPLAY_SETTINGS.set_bgm_volume(self.value)
 
 
     def get_handle_rect(self):
@@ -667,7 +702,9 @@ class InputBox(mFont):
                 # 退格键删除字符
                 self.title = self.title[:-1]
                 # 重新渲染文本
-                self.text = self.mfont.render(self.title, True, self.color)
+                self.text = ASSETS.text(
+                    self.title, self.path, self.size, self.color,
+                )
                 self.rect = self.text.get_rect()
                 # 调整文本位置
                 self.rect.topleft = (self.pos[0], self.pos[1])
@@ -676,7 +713,9 @@ class InputBox(mFont):
                 if len(self.title) < self.max_length:
                     self.title += event.unicode
                     # 重新渲染文本
-                    self.text = self.mfont.render(self.title, True, self.color)
+                    self.text = ASSETS.text(
+                        self.title, self.path, self.size, self.color,
+                    )
                     self.rect = self.text.get_rect()
                     # 调整文本位置
                     self.rect.topleft = (self.pos[0], self.pos[1])
@@ -719,7 +758,9 @@ class InputBox(mFont):
             text: 新的文本内容
         """
         self.title = text
-        self.text = self.mfont.render(self.title, True, self.color)
+        self.text = ASSETS.text(
+            self.title, self.path, self.size, self.color,
+        )
         self.rect = self.text.get_rect()
         self.rect.topleft = (self.pos[0], self.pos[1])
     
@@ -728,7 +769,9 @@ class InputBox(mFont):
         清空文本内容
         """
         self.title = ''
-        self.text = self.mfont.render(self.title, True, self.color)
+        self.text = ASSETS.text(
+            self.title, self.path, self.size, self.color,
+        )
         self.rect = self.text.get_rect()
         self.rect.topleft = (self.pos[0], self.pos[1])
     

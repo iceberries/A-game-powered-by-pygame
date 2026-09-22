@@ -4,6 +4,7 @@ import const
 import image
 from sound import *
 from core.base_level import BaseLevel
+from core.state import DISPLAY_SETTINGS
 
 class ConfigLevel(BaseLevel):
     def __init__(self):
@@ -44,13 +45,13 @@ class ConfigLevel(BaseLevel):
                 self.game_state = button_result['new_state']
                 return True
             
-            Flag = const.FullSrceen_Switch
+            Flag = DISPLAY_SETTINGS.fullscreen
             if Flag != self.switch_fullscreen.Switch_Button(event):
-                Flag = const.FullSrceen_Switch
+                Flag = DISPLAY_SETTINGS.fullscreen
                 self.switch_fullscreen.change_path(const.SWITCH_PATHS[Flag])
                 self.handle_resize(event, self.Setting_bg)
             self.volume_slider.handle_event(event)
-            pygame.mixer.music.set_volume(const.bgm_vol)
+            pygame.mixer.music.set_volume(DISPLAY_SETTINGS.bgm_volume)
         return False
 
     def draw(self):
@@ -60,7 +61,7 @@ class ConfigLevel(BaseLevel):
         self.volume_slider.draw(self.DS)
         self.switch_fullscreen.draw(self.DS)
         pygame.display.flip()
-        pygame.time.Clock().tick(const.fps)
+        self.clock.tick(const.RENDER_FPS)
 
     def run(self):
         while self.game_state == "config_state":

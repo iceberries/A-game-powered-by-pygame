@@ -3,6 +3,7 @@ import sys
 import const
 import image
 from sound import *
+from core.state import DISPLAY_SETTINGS
 from core.base_level import BaseLevel
 
 class MainMenu(BaseLevel):
@@ -25,7 +26,7 @@ class MainMenu(BaseLevel):
         self.background = image.Image('picture/bg0.jpg', (const.wsize, const.hsize), (0, 0), 0, 1, 0)
 
     def setup_music(self):
-        self.bgm = Musicm('sound/bgm.flac', const.bgm_vol)
+        self.bgm = Musicm('sound/bgm.flac', DISPLAY_SETTINGS.bgm_volume)
         if not self.bgm.Mget_busy():
             self.bgm.Play_music(True)
 
@@ -83,7 +84,7 @@ class MainMenu(BaseLevel):
         self.exit_font.fdraw(self.DS)
         self.config_font.fdraw(self.DS)
         pygame.display.flip()
-        pygame.time.Clock().tick(60)
+        self.clock.tick(const.RENDER_FPS)
 
     def run(self):
         while self.game_state == "main_menu":

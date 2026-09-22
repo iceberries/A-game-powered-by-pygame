@@ -2,13 +2,16 @@ import pygame
 import sys
 import const
 from levels import MainMenu, ConfigLevel, GameLevel, MultiplayerLevel
+from core.assets import ASSETS
+from core.state import DISPLAY_SETTINGS
 
 def main():
     pygame.init()
     pygame.mixer.init()
     pygame.display.set_caption("Capoo")
-    pygame.display.set_mode((const.wsize, const.hsize), const.Srceen_Mode[const.FullSrceen_Switch], 32)
-    pygame.display.set_icon(pygame.image.load('picture/Capoo/1.PNG'))
+    mode = pygame.FULLSCREEN if DISPLAY_SETTINGS.fullscreen else pygame.RESIZABLE
+    pygame.display.set_mode((const.wsize, const.hsize), mode, 32)
+    pygame.display.set_icon(ASSETS.image('picture/Capoo/1.PNG'))
 
     game_state = "main_menu"
     while True:

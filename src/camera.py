@@ -16,8 +16,16 @@ class Camera:
 
     def update(self, player_rect):
         # 让玩家始终居中
-        self.offset_x = player_rect.centerx - self.screen_width // 2
-        self.offset_y = player_rect.centery - self.screen_height // 2
+        self.update_center(player_rect.center)
+
+    def update_center(self, center):
+        """让给定的世界坐标位于屏幕中心。"""
+        self.offset_x = center[0] - self.screen_width / 2
+        self.offset_y = center[1] - self.screen_height / 2
+
+    def resize(self, screen_width, screen_height):
+        self.screen_width = screen_width
+        self.screen_height = screen_height
 
     def apply(self, rect):
         # 将世界坐标rect转换为屏幕坐标rect

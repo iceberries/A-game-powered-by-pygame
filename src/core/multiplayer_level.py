@@ -71,7 +71,7 @@ class MultiplayerLevel(BaseLevel):
         self.mul_server_font.fdraw(self.DS)
         self.mul_client_font.fdraw(self.DS)
         pygame.display.flip()
-        pygame.time.Clock().tick(const.fps)
+        self.clock.tick(const.RENDER_FPS)
 
     def run(self):
         while self.game_state == "mul_game_state":

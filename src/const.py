@@ -1,4 +1,5 @@
-import pygame  # 导入pygame库
+from core.game_rules import DEFAULT_RULES
+from core.state import DISPLAY_SETTINGS, GAME_CONFIG, GAME_SESSION
 
 gametitle = "Capoo Fight"
 icontitle = "capoo fight"  # 设置游戏标题
@@ -12,95 +13,115 @@ create_server = "服务端"  # 服务器创建界面标题
 join_server = "客户端"
 
 # 设置窗口大小为屏幕分辨率
-wsize = 1536
-hsize = 864
+wsize = DISPLAY_SETTINGS.width
+hsize = DISPLAY_SETTINGS.height
 capoo_x=wsize/2
 capoo_y=750
-capoo_width = 100
-capoo_hight = 70
+capoo_width, capoo_hight = map(int, GAME_CONFIG.player_size)
 # 玩家体型只有下限，没有上限：
 #   体型越大约束越强 —— get_shrink_speed() 的衰减随体型指数增长，靠这一点自然平衡，
 #   同时攻击判定区随体型一起变大（“长臂”等能力再在此基础上放大）。
 #   衰减到下限即视为“体型归零”，由关卡判定游戏结束。
-capoo_min_width = 40
-capoo_min_hight = 28
+capoo_min_width, capoo_min_hight = map(int, GAME_CONFIG.player_min_size)
 Enemy_x = 100
 Enemy_y = 750
-Enemy_HP = 1
-AttackEnemy_HP = 100
+Enemy_HP = GAME_CONFIG.enemy_hp
+AttackEnemy_HP = GAME_CONFIG.attack_enemy_hp
 color=(0, 0, 0)  # 设置背景颜色
-player_score = 10
-player_max_score = 10  # 记录最高分
-enemies_defeated = 0  # 累计击杀数
-upgrade_kill_step = 5  # 每击杀多少敌人解锁一次升级三选一
-upgrade_earned = 0  # 已按击杀进度发放的升级次数
-upgrade_pending = False  # 是否需要弹出升级界面
-upgrade_pending_count = 0  # 待处理的升级次数（可能一次积攒多次）
-bgm_vol = 0.5
-sfx_vol = 0.5
+player_score = GAME_SESSION.score
+player_max_score = GAME_SESSION.max_score  # 记录最高分
+enemies_defeated = GAME_SESSION.enemies_defeated  # 累计击杀数
+upgrade_kill_step = GAME_CONFIG.upgrade_kill_base
+upgrade_earned = GAME_SESSION.upgrade_earned
+upgrade_pending = GAME_SESSION.upgrade_pending
+upgrade_pending_count = GAME_SESSION.upgrade_pending_count
+bgm_vol = DISPLAY_SETTINGS.bgm_volume
+sfx_vol = DISPLAY_SETTINGS.sfx_volume
 # 渲染帧率与逻辑更新频率分开。游戏规则统一使用秒作为时间单位。
-SIMULATION_HZ = 60
-FIXED_DT = 1.0 / SIMULATION_HZ
-RENDER_FPS = 120
-MAX_FRAME_TIME = 0.1
-TIME_EPSILON = 1e-9
+SIMULATION_HZ = GAME_CONFIG.simulation_hz
+FIXED_DT = GAME_CONFIG.fixed_dt
+RENDER_FPS = GAME_CONFIG.render_fps
+MAX_FRAME_TIME = GAME_CONFIG.max_frame_time
+TIME_EPSILON = GAME_CONFIG.time_epsilon
 
 # 保留旧名称，供尚未迁移的 UI/网络代码使用。
 fps = SIMULATION_HZ
 text_size = 40  # 设置全局字体大小
 title1_size = 80  # 设置标题字体大小
 title2_size = 60  # 设置副标题字体大小
-FullSrceen_Switch = False
-Srceen_Mode = [pygame.RESIZABLE, pygame.FULLSCREEN]
+FullSrceen_Switch = DISPLAY_SETTINGS.fullscreen
 SWITCH_PATHS = ['picture/component/Switch_Off.png', 'picture/component/Switch_On.png']
 
+
+def set_resolution(width, height):
+    global wsize, hsize
+    DISPLAY_SETTINGS.resize(width, height)
+    wsize, hsize = DISPLAY_SETTINGS.width, DISPLAY_SETTINGS.height
+
+
+def set_fullscreen(enabled):
+    global FullSrceen_Switch
+    DISPLAY_SETTINGS.fullscreen = bool(enabled)
+    FullSrceen_Switch = DISPLAY_SETTINGS.fullscreen
+
+
+def set_bgm_volume(value):
+    global bgm_vol
+    DISPLAY_SETTINGS.set_bgm_volume(value)
+    bgm_vol = DISPLAY_SETTINGS.bgm_volume
+
+
+def set_sfx_volume(value):
+    global sfx_vol
+    DISPLAY_SETTINGS.set_sfx_volume(value)
+    sfx_vol = DISPLAY_SETTINGS.sfx_volume
+
+
+def _sync_session_aliases():
+    global player_score, player_max_score, enemies_defeated
+    global upgrade_earned, upgrade_pending, upgrade_pending_count
+    player_score = GAME_SESSION.score
+    player_max_score = GAME_SESSION.max_score
+    enemies_defeated = GAME_SESSION.enemies_defeated
+    upgrade_earned = GAME_SESSION.upgrade_earned
+    upgrade_pending_count = GAME_SESSION.upgrade_pending_count
+    upgrade_pending = GAME_SESSION.upgrade_pending
+
 def update_score(now_size):
-    global player_score, player_max_score
-    player_score = score_from_size(now_size)
-    player_max_score = max(player_max_score, player_score)
-    check_and_trigger_upgrade()  # 每次分数变动后检查升级
-    return player_score
+    score = GAME_SESSION.update_score(now_size, DEFAULT_RULES)
+    _sync_session_aliases()
+    return score
 
 def register_kill():
     """击杀敌人时调用：累计击杀数，并按击杀进度解锁升级三选一。"""
-    global enemies_defeated
-    enemies_defeated += 1
-    return check_and_trigger_upgrade()
+    pending = GAME_SESSION.register_kill(GAME_CONFIG)
+    _sync_session_aliases()
+    return pending
 
 def check_and_trigger_upgrade():
-    """每击杀 upgrade_kill_step 个敌人，就积攒一次升级三选一。"""
-    global upgrade_earned, upgrade_pending, upgrade_pending_count
-    earned = enemies_defeated // upgrade_kill_step
-    if earned > upgrade_earned:
-        upgrade_pending_count += earned - upgrade_earned
-        upgrade_earned = earned
-    upgrade_pending = upgrade_pending_count > 0
-    return upgrade_pending_count
+    """按 5、10、20、40……的指数击杀需求积攒升级三选一。"""
+    pending = GAME_SESSION.check_upgrades(GAME_CONFIG)
+    _sync_session_aliases()
+    return pending
 
 def clamp_capoo_size(width, height):
     """体型只有下限（所有体型变化的统一入口），返回 (宽, 高)。
 
     不设上限：成长会被随体型变快的衰减自然拉回平衡点。
     """
-    return (max(capoo_min_width, width), max(capoo_min_hight, height))
+    return DEFAULT_RULES.clamp_size(width, height)
 
 def score_from_size(now_size):
     """由体型宽度换算分数（与 update_score 同一公式，供 HUD 等处只读使用）。"""
-    return int((now_size + 100 - capoo_width) / 10)
+    return DEFAULT_RULES.score_from_size(now_size)
 
 def Reset_Game_Const():
     global capoo_x, capoo_y, capoo_width, capoo_hight, Enemy_x, Enemy_y
-    global player_score, player_max_score, enemies_defeated, upgrade_earned
-    global upgrade_pending, upgrade_pending_count
     capoo_x=wsize/2
     capoo_y=750
     capoo_width = 100
     capoo_hight = 70
     Enemy_x = 100
     Enemy_y = 750
-    player_score = 10
-    player_max_score = 10
-    enemies_defeated = 0
-    upgrade_earned = 0
-    upgrade_pending = False
-    upgrade_pending_count = 0
+    GAME_SESSION.reset()
+    _sync_session_aliases()

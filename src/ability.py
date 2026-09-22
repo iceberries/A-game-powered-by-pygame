@@ -1,5 +1,6 @@
 import pygame
 import math
+from core.assets import ASSETS
 
 # 品质配色：普通 / 稀有 / 史诗 / 传说
 QUALITY_COLORS = {
@@ -78,7 +79,7 @@ class Ability:
             self._icon_loaded = True
             if self.ability_image:
                 try:
-                    self._icon = pygame.image.load(self.ability_image).convert_alpha()
+                    self._icon = ASSETS.image(self.ability_image)
                 except (pygame.error, FileNotFoundError):
                     self._icon = None
         return self._icon
@@ -325,7 +326,10 @@ class MultiBiteAbility(Ability):
             return
         main_rect = player.get_attack_rect()
         bite_idx = min(player.bite_frame // 2, len(player.bite_images) - 1)
-        bite_img = pygame.transform.scale(player.bite_images[bite_idx], (main_rect.width, main_rect.height))
+        bite_img = ASSETS.image(
+            player.bite_paths[bite_idx],
+            (main_rect.width, main_rect.height),
+        )
         center = pygame.Vector2(player.getrect().center)
         for angle in self.attack_extra_angles():
             bite_rect = rotate_rect(main_rect, center, angle)

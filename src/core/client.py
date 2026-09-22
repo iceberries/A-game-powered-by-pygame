@@ -1,12 +1,15 @@
 import pygame
 import socket
 import threading
+import queue
 import re
-import json
 import const
 from image import Image, mFont, InputBox
 import sys
-from core.mul_game_level import MultiplayerGameLevel
+import camera
+from Enemies import Enemy, AttackChicken, GreenCapoo
+from core.protocol import MessageBuffer, ProtocolError, Sequence, send_message as send_packet
+from core.assets import ASSETS
 # ClientUIImage类 - 处理图片界面
 class ClientUIImage(Image):
     def __init__(self):
@@ -135,9 +138,11 @@ class ClientUIText(mFont):
         pygame.draw.rect(screen, (0, 0, 0), chat_rect, 2)
         
         # 绘制聊天消息
-        font = pygame.font.Font("font/BoutiqueBitmap9x9_Bold_1.9.TTF", 18)
         for i, message in enumerate(self.messages):
-            text_surface = font.render(message, True, (0, 0, 0))
+            text_surface = ASSETS.text(
+                message, "font/BoutiqueBitmap9x9_Bold_1.9.TTF", 18,
+                (0, 0, 0),
+            )
             screen.blit(text_surface, (chat_rect.x + 10, chat_rect.y + 10 + i * 20))
 
 # ClientUI类 - 主类
@@ -150,13 +155,15 @@ class ClientUI:
         self.local_ip = "127.0.0.1"
         self.local_port = 5555
         self.client_status = "未连接"
+        self.player_count = 0
+        self.max_players = 4
         
         # 创建图片UI和文本UI实例
         self.image_ui = ClientUIImage()
         self.text_ui = ClientUIText()
         self.game_exit_font = mFont(const.exittitle, 'font/BoutiqueBitmap9x9_Bold_1.9.TTF', const.text_size, (230, 100, 150), (const.wsize, 10))
         self.background = Image('picture/bg0.jpg', (const.wsize, const.hsize), (0, 0), 0, 1, 0)
-        self.grass_img = pygame.image.load('picture/grass.png').convert()
+        self.grass_img = ASSETS.image('picture/grass.png')
         
         # 设置背景颜色
         self.bg_color = (240, 240, 240)
@@ -170,6 +177,12 @@ class ClientUI:
         self.player_name = None
         self.game_state = {}
         self.keys_pressed = {}
+        self.incoming_messages = queue.Queue()
+        self.send_lock = threading.Lock()
+        self.action_sequence = Sequence()
+        self._last_server_tick = -1
+        # 每次成功连接都有独立代次。旧接收线程的断线事件不能关闭新连接。
+        self._connection_generation = 0
     def handle_game_input(self):
         """联机客户端输入处理，发送持续移动/停止指令到服务器"""
         if not self.in_game or not self.client:
@@ -187,18 +200,30 @@ class ClientUI:
         # 只在方向变化时发包
         if direction != getattr(self, '_last_move_dir', None):
             if direction:
-                try:
-                    msg = {"type": "action", "action": {"type": "move", "direction": direction}}
-                    self.client.send(json.dumps(msg).encode('utf-8'))
-                except Exception as e:
-                    self.text_ui.add_message(f"发送移动指令失败: {str(e)}", True)
+                self.send_action("move", direction=direction)
             else:
-                try:
-                    msg = {"type": "action", "action": {"type": "stop_move"}}
-                    self.client.send(json.dumps(msg).encode('utf-8'))
-                except Exception as e:
-                    self.text_ui.add_message(f"发送停止移动失败: {str(e)}", True)
+                self.send_action("stop_move")
             self._last_move_dir = direction
+
+    def send_action(self, action_type, **params):
+        sock = self.client
+        if not sock:
+            return False
+        message = {
+            "type": "action",
+            "sequence": self.action_sequence.next(),
+            "action": {"type": action_type, **params},
+        }
+        try:
+            send_packet(sock, message, self.send_lock)
+            return True
+        except OSError as exc:
+            self.incoming_messages.put({
+                "_local_type": "network_error",
+                "_generation": self._connection_generation,
+                "message": str(exc),
+            })
+            return False
     
     def validate_ip(self, ip_string):
         """
@@ -303,16 +328,31 @@ class ClientUI:
             self.text_ui.add_message("已经连接到服务器", True)
             return
         
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.client.connect((self.local_ip, self.local_port))
+            sock.settimeout(5.0)
+            sock.connect((self.local_ip, self.local_port))
+            sock.settimeout(0.5)
+            self.client = sock
+            self._connection_generation += 1
+            generation = self._connection_generation
             self.client_status = "已连接"
             self.text_ui.update_status(self.client_status)
             self.text_ui.add_message(f"成功连接到服务器 {self.local_ip}:{self.local_port}", True)
             
             # 启动接收消息的线程
-            threading.Thread(target=self.receive_messages, daemon=True).start()
+            threading.Thread(
+                target=self.receive_messages,
+                args=(sock, generation),
+                daemon=True,
+            ).start()
         except Exception as e:
+            try:
+                sock.close()
+            except OSError:
+                pass
+            if self.client is sock:
+                self.client = None
             self.text_ui.add_message(f"连接失败: {str(e)}", True)
     
     def send_message(self, message):
@@ -320,108 +360,134 @@ class ClientUI:
         if not self.client:
             self.text_ui.add_message("未连接到服务器，无法发送消息", True)
             return
+        if message.strip() == "/start":
+            self.text_ui.add_message("只有房主可以在服务器界面开始游戏", True)
+            return
+        if message.strip() == "/quit":
+            if self.in_game:
+                self.send_action("quit_game")
+                self.in_game = False
+                self.text_ui.add_message("已退出游戏", True)
+            return
         try:
-            # 检查是否是游戏命令
-            if message.startswith("/"):
-                command_parts = message.split()
-                command = command_parts[0][1:]  # 去掉斜杠
-                
-                if command == "start" and len(command_parts) == 1:
-                    # 发送开始游戏请求
-                    msg = {"type": "start_game"}
-                    self.client.send(json.dumps(msg).encode('utf-8'))
-                    self.text_ui.add_message("已发送开始游戏请求", True)
-                    return
-                elif command == "quit" and len(command_parts) == 1:
-                    # 退出游戏
-                    if self.in_game:
-                        self.in_game = False
-                        msg = {"type": "quit_game"}
-                        self.client.send(json.dumps(msg).encode('utf-8'))
-                        self.text_ui.add_message("已退出游戏", True)
-                    else:
-                        self.text_ui.add_message("当前不在游戏中", True)
-                    return
-            
-            # 普通聊天消息
-            msg = {
-                "type": "chat",
-                "message": message,
-                "sender": "你"
-            }
-            self.client.send(json.dumps(msg).encode('utf-8'))
-        except Exception as e:
-            self.text_ui.add_message(f"发送失败: {str(e)}", True)
+            send_packet(
+                self.client,
+                {"type": "chat", "message": message},
+                self.send_lock,
+            )
+        except OSError as exc:
+            self.text_ui.add_message(f"发送失败: {str(exc)}", True)
 
-    def receive_messages(self):
-        """接收服务器消息的线程"""
-        while self.running and self.client:
-            try:
-                data = self.client.recv(4096)  # 增大缓冲区以接收游戏状态
-                if data:
-                    try:
-                        msg = json.loads(data.decode('utf-8'))
-                        
-                        # 处理不同类型的消息
-                        if isinstance(msg, dict):
-                            msg_type = msg.get('type')
-                            
-                            # 聊天消息
-                            if 'message' in msg:
-                                sender = msg.get('sender', '未知')
-                                self.text_ui.add_message(f"{sender}: {msg['message']}")
-                            
-                            # 游戏开始消息
-                            elif msg_type == 'game_start':
-                                self.start_game()
-                                self.text_ui.add_message("游戏开始！", True)
-                            
-                            # 游戏状态同步消息
-                            elif msg_type == 'sync' and self.in_game:
-                                self.handle_sync_message(msg)
-                            
-                            # 其他消息
-                            else:
-                                self.text_ui.add_message(f"未知消息类型: {msg_type}", True)
-                        else:
-                            self.text_ui.add_message(f"无效的消息格式: {msg}", True)
-                    except json.JSONDecodeError as e:
-                        self.text_ui.add_message(f"消息解析错误: {str(e)}", True)
-                    except Exception as e:
-                        self.text_ui.add_message(f"处理消息时发生错误: {str(e)}", True)
-                else:
-                    # 如果收到空消息，表示服务器已断开连接
-                    self.client.close()
-                    self.client = None
-                    self.client_status = "未连接"
-                    self.in_game = False
-                    self.text_ui.update_status(self.client_status)
-                    self.text_ui.add_message("与服务器的连接已断开", True)
+    def receive_messages(self, sock, generation):
+        """网络线程只解码字节并写入队列，不调用任何 Pygame/UI API。"""
+        decoder = MessageBuffer()
+        reason = "与服务器的连接已断开"
+        try:
+            while self.running and self.client is sock:
+                try:
+                    data = sock.recv(65536)
+                except socket.timeout:
+                    continue
+                if not data:
                     break
-            except ConnectionResetError:
-                self.client = None
-                self.client_status = "未连接"
+                for message in decoder.feed(data):
+                    self.incoming_messages.put(message)
+        except (OSError, ProtocolError) as exc:
+            reason = f"网络错误: {exc}"
+        finally:
+            self.incoming_messages.put({
+                "_local_type": "disconnected",
+                "_generation": generation,
+                "message": reason,
+            })
+
+    def process_network_messages(self):
+        """由 Pygame 主线程调用，安全地修改 UI 和渲染对象。"""
+        while True:
+            try:
+                message = self.incoming_messages.get_nowait()
+            except queue.Empty:
+                return
+            local_type = message.get("_local_type")
+            if local_type in {"disconnected", "network_error"}:
+                if message.get("_generation") != self._connection_generation:
+                    continue
+                self.close_connection()
                 self.in_game = False
-                self.text_ui.update_status(self.client_status)
-                self.text_ui.add_message("服务器强制关闭连接", True)
-                break
-            except Exception as e:
-                self.client = None
+                self.player_count = 0
                 self.client_status = "未连接"
-                self.in_game = False
                 self.text_ui.update_status(self.client_status)
-                self.text_ui.add_message(f"接收消息错误: {str(e)}", True)
-                break
-    
-    def start_game(self):
-        """开始游戏（复用MultiplayerGameLevel的渲染）"""
+                self.text_ui.add_message(message.get("message", "网络已断开"), True)
+                continue
+
+            message_type = message.get("type")
+            if message_type == "welcome":
+                self.player_name = message.get("player_name")
+                self.update_room_status(message)
+                self.text_ui.add_message(f"您的玩家名称: {self.player_name}", True)
+            elif message_type == "chat":
+                self.text_ui.add_message(
+                    f"{message.get('sender', '未知')}: {message.get('message', '')}"
+                )
+            elif message_type == "system":
+                self.update_room_status(message)
+                self.text_ui.add_message(message.get("message", ""), True)
+            elif message_type == "game_start":
+                self.player_name = message.get("you", self.player_name)
+                self.player_count = len(message.get("players", {}))
+                self.start_game(message)
+                self.client_status = (
+                    f"游戏中 · {self.player_count}/{self.max_players}"
+                )
+                self.text_ui.update_status(self.client_status)
+                self.text_ui.add_message("游戏开始！", True)
+            elif message_type == "sync" and self.in_game:
+                self.handle_sync_message(message)
+            elif message_type == "game_end":
+                self.in_game = False
+                self.update_room_status(message)
+                self.text_ui.add_message(message.get("message", "游戏结束"), True)
+            elif message_type == "error":
+                self.text_ui.add_message(message.get("message", "服务器错误"), True)
+
+    def update_room_status(self, message):
+        if "player_count" in message:
+            self.player_count = message["player_count"]
+        if "max_players" in message:
+            self.max_players = message["max_players"]
+        if self.in_game:
+            self.client_status = (
+                f"游戏中 · {self.player_count}/{self.max_players}"
+            )
+        else:
+            self.client_status = (
+                f"已连接 · 房间 {self.player_count}/{self.max_players}"
+            )
+        self.text_ui.update_status(self.client_status)
+
+    def close_connection(self):
+        sock = self.client
+        self.client = None
+        if not sock:
+            return
+        self._connection_generation += 1
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def start_game(self, initial_state):
+        """在主线程创建纯渲染对象。"""
         self.in_game = True
-        # 初始化多人关卡对象
-        self.game_level = MultiplayerGameLevel(multiplayer=True)
-        # 玩家对象缓存：{player_name: Image实例}
         self.player_objs = {}
-        # 敌人对象缓存：[{...Enemy实例...}]
-        self.enemy_objs = []
+        self.enemy_objs = {}
+        self.camera = camera.Camera(const.wsize, const.hsize)
+        self._last_server_tick = -1
+        self.handle_sync_message(initial_state)
         self.text_ui.add_message("游戏初始化完成", True)
 
     def handle_sync_message(self, msg):
@@ -429,48 +495,83 @@ class ClientUI:
         if not isinstance(msg, dict):
             self.text_ui.add_message("无效的同步消息格式", True)
             return
+        server_tick = msg.get("tick", -1)
+        if server_tick <= self._last_server_tick:
+            return
+        self._last_server_tick = server_tick
         self.game_state = msg
-        # 玩家名识别
-        if not self.player_name and 'players' in msg:
-            for client in msg['players']:
-                if msg['players'][client].get('is_you', False):
-                    self.player_name = client
-                    self.text_ui.add_message(f"您的玩家名称已设置为: {self.player_name}", True)
-                    break
-        # --- 同步玩家对象 ---
-        if hasattr(self, 'game_level') and self.game_level:
-            # 玩家
-            players = msg.get('players', {})
-            for name, pdata in players.items():
-                if name not in self.player_objs:
-                    # 创建Image对象，假设所有玩家用同一贴图
-                    self.player_objs[name] = Image('picture/Capoo/%d.png', (const.capoo_width, const.capoo_hight), pdata.get('pos', (0,0)), 1, 8, 1)
-                obj = self.player_objs[name]
-                obj.pos = list(pdata.get('pos', (0,0)))
-                obj.facing_left = pdata.get('facing_left', False)
-                obj.hp = pdata.get('hp', 100)
-                obj.size = pdata.get('size', (const.capoo_width, const.capoo_hight))
+        players = msg.get('players', {})
+        for removed in set(self.player_objs) - set(players):
+            del self.player_objs[removed]
+        for name, pdata in players.items():
+            if name not in self.player_objs:
+                self.player_objs[name] = Image(
+                    'picture/Capoo/%d.png',
+                    tuple(pdata.get('size', (const.capoo_width, const.capoo_hight))),
+                    pdata.get('pos', (0, 0)),
+                    1, 8, 1,
+                )
+            obj = self.player_objs[name]
+            obj.pos = list(pdata.get('pos', (0, 0)))
+            obj.facing_left = pdata.get('facing_left', False)
+            obj.hp = pdata.get('hp', 100)
+            obj.size = tuple(pdata.get('size', (const.capoo_width, const.capoo_hight)))
+            obj.is_attacking = pdata.get('attacking', False)
+            if obj.is_attacking:
+                # 客户端不自行推进权威状态；根据服务端时间渲染对应攻击帧。
+                obj.attack_frame = pdata.get('attack_elapsed', 0.0)
+                obj.play_attack_animation(0.0)
+            else:
                 obj.reloade()
-            # 敌人
-            enemies = msg.get('enemies', [])
-            # 数量变化时重建
-            if len(self.enemy_objs) != len(enemies):
-                from Enemies import Enemy
-                self.enemy_objs = [Enemy(None, size=e.get('size', (50,50)), speed=2) for e in enemies]
-            for obj, edata in zip(self.enemy_objs, enemies):
-                obj.pos = list(edata.get('pos', (0,0)))
-                obj.facing_left = edata.get('facing_left', False)
-                obj.hp = edata.get('hp', 100)
-                obj.size = edata.get('size', (50,50))
+
+        enemy_states = {str(item['id']): item for item in msg.get('enemies', [])}
+        for removed in set(self.enemy_objs) - set(enemy_states):
+            del self.enemy_objs[removed]
+        target = self.player_objs.get(self.player_name)
+        for enemy_id, edata in enemy_states.items():
+            enemy_type = edata.get('type')
+            if enemy_type in {'attack', 'attack_chicken'}:
+                expected_type = AttackChicken
+            elif enemy_type == 'green_capoo':
+                expected_type = GreenCapoo
+            else:
+                expected_type = Enemy
+            obj = self.enemy_objs.get(enemy_id)
+            if obj is None or not isinstance(obj, expected_type):
+                obj = expected_type(
+                    target,
+                    size=tuple(edata.get('size', (50, 50))),
+                    speed=0,
+                )
+                self.enemy_objs[enemy_id] = obj
+            obj.player = target
+            obj.pos = list(edata.get('pos', (0, 0)))
+            obj.facing_left = edata.get('facing_left', False)
+            obj.hp = edata.get('hp', 1)
+            obj.size = tuple(edata.get('size', (50, 50)))
+            if isinstance(obj, AttackChicken):
+                obj.is_attacking = edata.get('attacking', False)
+                if obj.is_attacking:
+                    # 使用服务端权威的攻击时间选择 Enemy/AT 动画帧。
+                    obj.attack_frame = edata.get('attack_elapsed', 0.0)
+                    obj.play_animation(0.0)
+                else:
+                    obj.play_animation(0.0)
+            else:
                 obj.reloade()
 
     def draw_game(self):
-        """复用game_level的draw逻辑进行渲染，并绘制UI和草地背景"""
-        if not self.in_game or not self.game_state or not hasattr(self, 'game_level'):
+        """客户端只渲染服务器快照，不在本地运行权威规则。"""
+        if not self.in_game or not self.game_state:
             return
-        # 平铺grass.png作为背景
+        shared_center = self.game_state.get('camera', {}).get('center')
+        if (isinstance(shared_center, (list, tuple))
+                and len(shared_center) == 2):
+            # 所有客户端使用服务端计算的存活玩家几何中心，保持共享视野。
+            self.camera.update_center(shared_center)
         grass_w, grass_h = self.grass_img.get_width(), self.grass_img.get_height()
-        offset_x, offset_y = 0, 0  # 联机模式暂不支持camera
+        offset_x = self.camera.offset_x % grass_w
+        offset_y = self.camera.offset_y % grass_h
         for x in range(-grass_w, const.wsize + grass_w, grass_w):
             for y in range(-grass_h, const.hsize + grass_h, grass_h):
                 screen_x = x - offset_x
@@ -478,12 +579,14 @@ class ClientUI:
                 self.screen.blit(self.grass_img, (screen_x, screen_y))
         # 玩家
         for name, obj in self.player_objs.items():
-            obj.draw(self.screen)
+            obj.draw(self.screen, self.camera)
         # 敌人
-        for obj in self.enemy_objs:
-            obj.draw(self.screen)
+        for obj in self.enemy_objs.values():
+            obj.draw(self.screen, self.camera)
         # 分数
-        score = self.game_state.get('score', 0)
+        score = self.game_state.get('players', {}).get(
+            self.player_name, {}
+        ).get('score', 0)
         mFont(f"score:{score}", 'font/BoutiqueBitmap9x9_Bold_1.9.ttf', 50, (230, 100, 150), (const.wsize, 160)).fdraw(self.screen)
         # 退出按钮
         self.game_exit_font.fdraw(self.screen)
@@ -493,19 +596,15 @@ class ClientUI:
         """运行客户端UI，支持UI自适应和主菜单切换"""
         clock = pygame.time.Clock()
         while self.running:
+            self.process_network_messages()
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.running = False
-                    # 确保关闭连接
-                    if self.client:
-                        try:
-                            self.client.close()
-                        except:
-                            pass
+                    self.close_connection()
                     pygame.quit()
                     sys.exit()
                 elif event.type == pygame.VIDEORESIZE:
-                    const.wsize, const.hsize = event.w, event.h
+                    const.set_resolution(event.w, event.h)
                     self.screen = pygame.display.set_mode((const.wsize, const.hsize), pygame.RESIZABLE)
                     # 保留历史消息和状态，重建UI
                     old_messages = self.text_ui.messages if hasattr(self.text_ui, 'messages') else []
@@ -518,9 +617,13 @@ class ClientUI:
                     self.game_exit_font.pos = [(const.wsize - self.game_exit_font.getrect().width - 10), 10]
                     # 重新加载背景和草地图片
                     self.background = Image('picture/bg0.jpg', (const.wsize, const.hsize), (0, 0), 0, 1, 0)
-                    self.grass_img = pygame.image.load('picture/grass.png').convert()
+                    self.grass_img = ASSETS.image('picture/grass.png')
+                    if hasattr(self, 'camera'):
+                        self.camera.resize(const.wsize, const.hsize)
                 # 处理所有其他事件（包括窗口缩放）
                 if self.in_game:
+                    if event.type == pygame.KEYDOWN and event.key == pygame.K_j:
+                        self.send_action("attack")
                     # 处理退出按钮
                     button_result = self.game_exit_font.Button(event, "main_menu")
                     if button_result['state_change']:
@@ -535,10 +638,6 @@ class ClientUI:
             else:
                 self.draw()
                 
-            clock.tick(const.fps)
+            clock.tick(const.RENDER_FPS)
         # 关闭连接
-        if self.client:
-            try:
-                self.client.close()
-            except:
-                pass
+        self.close_connection()

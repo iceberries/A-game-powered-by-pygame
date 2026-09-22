@@ -5,6 +5,7 @@ from image import Image
 import pygame
 import random
 import const
+from core.assets import ASSETS
 class Enemy(Image):
     def __init__(self, player, size=(50, 50), speed=2):
         side = random.choice(['left', 'right'])
@@ -136,9 +137,8 @@ class AttackEnemy(Enemy):
         if self.is_attacking:
             idx = min(self.attack_frame // max(1, self.attack_cooldown // 3), len(self.attack_paths) - 1)
             path = self.attack_paths[idx]
-            self.original_image = pygame.image.load(path).convert_alpha()
-            self.original_image = pygame.transform.scale(self.original_image, self.size)
-            self.image = pygame.transform.flip(self.original_image, not self.facing_left, False)
+            self.original_image = ASSETS.image(path, self.size)
+            self.image = ASSETS.image(path, self.size, not self.facing_left)
             self.attack_frame += 1
             if self.attack_frame >= self.attack_cooldown:
                 self.is_attacking = False

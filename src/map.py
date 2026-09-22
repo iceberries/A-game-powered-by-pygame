@@ -1,6 +1,7 @@
 import pygame
 import os
 import json
+from core.assets import ASSETS
 
 tile_size = 64
 # 假设地图文件为 map.txt，地块类型为0:草地, 1:水, 2:墙
@@ -21,7 +22,7 @@ def load_tile_images():
     images = {}
     for k, path in TILE_IMG_PATHS.items():
         if os.path.exists(path):
-            images[k] = pygame.image.load(path).convert()
+            images[k] = ASSETS.image(path)
         else:
             images[k] = pygame.Surface((tile_size, tile_size))
             images[k].fill((100, 100, 100))
